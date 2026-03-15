@@ -1,0 +1,78 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{amssymb}
+\usepackage{url}
+\newcommand{\F}{\mathbb{F}}
+
+\title{Writeup Regarding OPRF implementation}
+\author{Diego F. Aranha \and Aron van Baarsen \and Adam Blatchley Hansen \and Kent Nielsen \and Peter Scholl}
+
+\begin{document}
+\maketitle
+
+Alongside this write-up, the cleaned submission version of the implementations from the OPRF paper is attached.
+
+\section{Structure of the implementation}
+The implementation of the OPRF is an extension of the Swanky library \cite{swanky} written in Rust.
+The implementation is part of a private GitHub Repository located at:
+\begin{center}
+    \url{https://github.com/dfaranha/Crypto-Dark-Matter-OPRF-minimal}
+\end{center}
+The implementation is available to reviewers in anonymized form, thus not publicly available yet. 
+The choice of extending this publicly available library is due to several reasons, some of which are:
+\begin{itemize}
+    \item Number of building blocks needed already implemented (e.g, VOLE extension, OT extension, some field arithmetics).
+    \item All implementations are generic, allowing for easy reuse of building blocks for different finite fields.
+    \item The only library containing an implementation of the paper on high-degree ZK-proofs we utilize \cite{conversions}.
+\end{itemize}
+Hence, by extending this existing library, the implementation has been produced significantly faster than writing everything from scratch.
+
+\section{Scope of our implementation}
+The code contains the implementation of all protocols present in the paper, alongside additional elements needed to enable the protocol. 
+The following is an exhaustive list of protocols introduced to the library:
+\begin{itemize}
+    \item Fully malicious OPRF.
+    \item Malicious client OPRF.
+    \item Semi-honest OPRF.
+    \item One-sided authenticated Bits - Linear code approach.
+    \item One-sided authenticated Bits - Cut \& Choose approach.
+    \item Multiplication triples over $\F_3$.
+    \item daBit protocol over $(\F_2, \F_3)$.
+    \item Half authenticated Bits over $(\F_2, \F_3)$.
+    \item Semi-honest modulus conversion bits.
+    \item Input encoding and checks based on linear code.
+\end{itemize}
+Note that the Semi-honest variant is not included in the paper submission, and thus not proven secure. Usage of this variant requires caution.
+The following is an exhaustive list of new parts introduced to the library to allow the above protocols to function.
+\begin{itemize}
+    \item Arithmetic in fields $(\F_3, \F_{3^{82}}, \F_{2^{256}})$.
+    \item Endemic Oblivious Transfer based on Kyber.
+    \item Kyber implementation.
+    \item Optimizations to VOLE extension.
+\end{itemize}
+Note: Not all parts are novel from the paper/implementation, some are reused as described below.
+
+\section{Reuse of Publicly Available Implementations \& Protocols}
+The implementations of the following are either reused from existing code or protocols from publications.
+\begin{itemize}
+    \item Semi-honest modulus conversion bits: Implementation of \cite[Protocol 5.2]{C:DGHIKS21} by converting a OLE into an OT.
+    \item Arithmetic on $(\F_3, \F_{3^{82}})$: The ternary field operations are implemented of algorithms from \cite{f3algo} and \cite{finitefieldmul}.
+    \item Endemic Oblivious Transfer based on Kyber: The implementation is a Rust port of the C implementation from the library libOTe \cite{libOTe}.
+    \item Kyber implementation: This is the implementation from \cite{Kyber}.
+    \item Optimizations to VOLE extension: These optimizations include ideas from \cite{emp-zk} and new trivial changes to reduce the amount of work.
+\end{itemize}
+
+\section{Structure of code base}
+The source code of the implementations can be found in the following locations.
+\begin{itemize}
+    \item OPRF Protocols - \texttt{oprf/src/*}
+    \item Finite field arithmetic - \texttt{scuttlebutt/src/field/\{f3, f82t, f256b\}}
+    \item Kyber implementation - \texttt{Kyber\_ot/*}
+    \item Endemic OT - \texttt{ocelot/src/ot/endemic\_ot.rs}
+    \item VOLE optimizations - \texttt{ocelot/src/svole/wykw/svole.rs}
+\end{itemize}
+
+\bibliographystyle{alpha}
+\bibliography{code}
+\end{document}

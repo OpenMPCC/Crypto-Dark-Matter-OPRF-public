@@ -1,0 +1,83 @@
+[package]
+name = "scuttlebutt"
+readme = "README.md"
+description = "A library of useful multi-party computation utilities"
+keywords = ["cryptography", "MPC", "secure-computation"]
+categories = ["cryptography"]
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[features]
+ff = ["dep:ff", "dep:ff_codegen", "rand_chacha"]
+nightly = ["curve25519-dalek/nightly", "curve25519-dalek/simd_backend"]
+unstable = []
+serde = []
+
+[dependencies]
+curve25519-dalek = { workspace = true, optional = true }
+rand.workspace = true
+rand_core.workspace = true
+rand_chacha = { workspace = true, optional = true }
+serde.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+generic-array.workspace = true
+smallvec.workspace = true
+bytemuck = { workspace = true, features = ["derive"] }
+vectoreyes.workspace = true
+ndarray.workspace = true
+num-traits.workspace = true
+ff = { workspace = true, features = ["derive"], optional = true }
+
+[build-dependencies]
+ff_codegen = { workspace = true, optional = true }
+tempfile.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+hex.workspace = true
+proptest.workspace = true
+num-bigint.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[[bench]]
+name = "aes128"
+harness = false
+
+[[bench]]
+name = "aes256"
+harness = false
+
+[[bench]]
+name = "block"
+harness = false
+
+[[bench]]
+name = "block512"
+harness = false
+
+[[bench]]
+name = "commitment"
+harness = false
+
+[[bench]]
+name = "hash_aes"
+harness = false
+
+[[bench]]
+name = "rand_aes"
+harness = false
+
+[[bench]]
+name = "finite_fields"
+harness = false
+
+[[bench]]
+name = "f64t"
+harness = false
