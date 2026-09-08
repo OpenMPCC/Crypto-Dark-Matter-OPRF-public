@@ -83,6 +83,45 @@ fn reduce(c0: u128, c1: u128, c2: u128, c3: u128) -> F256b{
     }
 }
 
+/// A mask selecting groups of `shift` set bits alternating with `shift`
+/// clear bits, repeated to fill 128 bits (e.g. shift=4 gives 0x0F0F...0F).
+/// Used to build the "spread bits apart" masks below without hand-transcribing
+/// 32-hex-digit literals.
+const fn spread_mask(shift: u32) -> u128 {
+    let unit_ones: u128 = (1u128 << shift) - 1;
+    let mut mask = unit_ones;
+    let mut width = 2 * shift;
+    while width < 128 {
+        mask |= mask << width;
+        width *= 2;
+    }
+    mask
+}
+
+const SPREAD_MASK_32: u128 = spread_mask(32);
+const SPREAD_MASK_16: u128 = spread_mask(16);
+const SPREAD_MASK_8: u128 = spread_mask(8);
+const SPREAD_MASK_4: u128 = spread_mask(4);
+const SPREAD_MASK_2: u128 = spread_mask(2);
+const SPREAD_MASK_1: u128 = spread_mask(1);
+
+/// Move bit `i` of `x` (for i in 0..64) to bit `2*i` of the result, with
+/// every odd-indexed bit of the result zero. Standard SWAR "bit spread" /
+/// Morton-code technique: at each step, bits are shifted right by half the
+/// remaining gap and OR'd back in, then masked to keep only the bits now in
+/// their final half; six halvings (64 -> 32 -> 16 -> 8 -> 4 -> 2 -> 1) place
+/// every bit in its own 2-bit slot.
+const fn spread64_to_128(x: u64) -> u128 {
+    let mut v = x as u128;
+    v = (v | (v << 32)) & SPREAD_MASK_32;
+    v = (v | (v << 16)) & SPREAD_MASK_16;
+    v = (v | (v << 8)) & SPREAD_MASK_8;
+    v = (v | (v << 4)) & SPREAD_MASK_4;
+    v = (v | (v << 2)) & SPREAD_MASK_2;
+    v = (v | (v << 1)) & SPREAD_MASK_1;
+    v
+}
+
 impl F256b {
     /// Shifts the field element left by one bit, reducing it modulo the irreducible polynomial.
     /// This is equavialent as multiplying by x in the field.
@@ -92,6 +131,20 @@ impl F256b {
 
         self.high = c2;
         self.low = c3;
+    }
+
+    /// Squares the field element. In characteristic 2, (sum a_i x^i)^2 =
+    /// sum a_i x^(2i): squaring a polynomial just moves each coefficient to
+    /// double its position, with every odd-degree coefficient of the result
+    /// zero. So the (unreduced) square is obtained by spreading the bits of
+    /// `low` and `high` apart rather than by a full carryless multiplication,
+    /// then reducing with the same `reduce()` used for general multiplication.
+    pub fn square(&self) -> F256b {
+        let c3 = spread64_to_128(self.low as u64);
+        let c2 = spread64_to_128((self.low >> 64) as u64);
+        let c1 = spread64_to_128(self.high as u64);
+        let c0 = spread64_to_128((self.high >> 64) as u64);
+        reduce(c0, c1, c2, c3)
     }
 
     /// Multiply with a power
@@ -235,15 +288,51 @@ impl FiniteField for F256b{
     }
 
     fn inverse(&self) -> Self {
-        // a^(-1) = a^(2^256 - 2) by Fermat's little theorem.
-        let mut square = *self;
-        square *= square; // a^2
-        let mut result = square;
-        for _ in 2..256 {
-            square *= square; // a^(2^i)
-            result *= square;
+        // a^(-1) = a^(2^256 - 2) = (a^(2^255 - 1))^2 by Fermat's little
+        // theorem. Reaching the exponent 2^255 - 1 by 254 sequential
+        // multiplications (one per squaring) works but is far more
+        // multiplication-heavy than necessary. Instead use the standard
+        // addition chain for "repunit" exponents: maintaining x_k = a^(2^k-1),
+        //   double:   x_{2k}   = x_k^(2^k) * x_k      (k squarings, 1 mult)
+        //   add one:  x_{k+1}  = x_k^2 * a             (1 squaring, 1 mult)
+        // reaches k = 255 = 0b1111_1111 via 8 doublings and 7 add-ones (an
+        // addition chain in the exponent that mirrors 255's all-ones binary
+        // form), then one final squaring gives a^(2^256-2): 255 squarings
+        // (unavoidable -- the exponent's bit length doesn't shrink) but only
+        // 14 multiplications, versus 254 in the direct approach. And since
+        // every squaring here is F256b::square() -- bit-spread + reduce,
+        // not a full carryless multiplication -- those 255 squarings are
+        // themselves far cheaper than 255 multiplications would be.
+        let a = *self;
+
+        fn pow2k(x: F256b, k: u32) -> F256b {
+            let mut y = x;
+            for _ in 0..k {
+                y = y.square();
+            }
+            y
         }
-        result
+        // x_k -> x_{2k}
+        let double = |x_k: F256b, k: u32| pow2k(x_k, k) * x_k;
+        // x_k -> x_{k+1}
+        let add_one = |x_k: F256b| x_k.square() * a;
+
+        let x1 = a;
+        let x2 = double(x1, 1);
+        let x3 = add_one(x2);
+        let x6 = double(x3, 3);
+        let x7 = add_one(x6);
+        let x14 = double(x7, 7);
+        let x15 = add_one(x14);
+        let x30 = double(x15, 15);
+        let x31 = add_one(x30);
+        let x62 = double(x31, 31);
+        let x63 = add_one(x62);
+        let x126 = double(x63, 63);
+        let x127 = add_one(x126);
+        let x254 = double(x127, 127);
+        let x255 = add_one(x254);
+        x255.square()
     }
 }
 
