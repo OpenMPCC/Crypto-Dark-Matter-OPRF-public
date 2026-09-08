@@ -1,5 +1,6 @@
 
-use scuttlebutt::{field::F3, ring::FiniteRing};
+use rand::SeedableRng;
+use scuttlebutt::{field::F3, ring::FiniteRing, AesRng, Block};
 
 // Setup timing for different window sizes
 // 4  -> 5ms
@@ -24,6 +25,21 @@ use scuttlebutt::{field::F3, ring::FiniteRing};
 
 const WINDOWS_SIZE: usize = 16;
 type PackingSize = u16;
+
+/// The public B matrix and its precomputed lookup table, generated from the
+/// same all-zero seed every `examples/bench_*.rs` and `e2e_oracle.rs` uses.
+/// Shared here so those binaries don't each repeat the generation loop.
+pub fn generate_fixed_b() -> ([[F3; 256]; 82], Vec<F3>) {
+    let mut b_rng = AesRng::from_seed(Block::from([0; 16]));
+    let mut b: [[F3; 256]; 82] = [[F3::ZERO; 256]; 82];
+    for i in 0..82 {
+        for j in 0..256 {
+            b[i][j] = F3::random(&mut b_rng);
+        }
+    }
+    let bc = generate_precompute_tables(b);
+    (b, bc)
+}
 
 pub fn generate_precompute_tables(b: [[F3;256];82]) -> Vec<F3>{
     let mut table = Vec::new();

@@ -1,25 +1,15 @@
 use std::time::Instant;
 
 
-use oprf::{matrix_util::generate_precompute_tables, semi_OPRF::{semi_oprf_client, semi_oprf_server, semi_preprocesses_client, semi_preprocesses_server}};
+use oprf::{matrix_util::generate_fixed_b, semi_OPRF::{semi_oprf_client, semi_oprf_server, semi_preprocesses_client, semi_preprocesses_server}};
 use rand::SeedableRng;
-use scuttlebutt::{field::{F256b, F3}, ring::FiniteRing, track_unix_channel_pair, AesRng, Block};
+use scuttlebutt::{field::F256b, ring::FiniteRing, track_unix_channel_pair, AesRng};
 
 fn main(){
     for i in 0..20{
         let (client, server) = track_unix_channel_pair();
         let batch_size = 1<<i;
-        let seed = Block::from([0; 16]);
-        let mut b_rng = AesRng::from_seed(seed);
-        let mut b: [[F3; 256];82] = [[F3::ZERO; 256]; 82];
-        // Randomly assing values to B
-        for i in 0..82 {
-            for j in 0..256 {
-                b[i][j] = F3::random(&mut b_rng);
-            }
-        }
-        
-        let b = generate_precompute_tables(b);
+        let (_, b) = generate_fixed_b();
         let bs = b.clone();
 
         let handle = std::thread::spawn(move  || {
