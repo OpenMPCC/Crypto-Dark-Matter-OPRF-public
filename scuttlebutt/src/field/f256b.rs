@@ -235,11 +235,13 @@ impl FiniteField for F256b{
     }
 
     fn inverse(&self) -> Self {
-        // Implementing the inverse using Fermat's little theorem for fields of characteristic 2
-        // In GF(2^n), a^(-1) = a^(2^n - 2)
-        let mut result = *self;
-        for _ in 0..254 {
-            result *= self;
+        // a^(-1) = a^(2^256 - 2) by Fermat's little theorem.
+        let mut square = *self;
+        square *= square; // a^2
+        let mut result = square;
+        for _ in 2..256 {
+            square *= square; // a^(2^i)
+            result *= square;
         }
         result
     }
