@@ -121,6 +121,8 @@ This repository is distributed under [License](./LICENSE), unless otherwise spec
 
 This work is part of the project MPCC financed by the *Agentur für Innovation in der Cybersicherheit GmbH (Cyberagentur)* in the framework of the EC2 program.
 
+<img src="CA_logo.svg" alt="LOGO CA" width="100"/>
+
 ## Contact
 
 You can contact the `OpenMPCC` team at `cyberagentur-group@enclaive.io`.
