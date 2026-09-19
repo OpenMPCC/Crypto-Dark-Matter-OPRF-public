@@ -119,7 +119,7 @@ This repository is distributed under [License](./LICENSE), unless otherwise spec
 
 ## Acknowledgement
 
-This work has been supported by funding from *Agentur für Innovation in der Cybersicherheit GmbH*.
+This work is part of the project MPCC financed by the *Agentur für Innovation in der Cybersicherheit GmbH (Cyberagentur)* in the framework of the EC2 program.
 
 ## Contact
 
