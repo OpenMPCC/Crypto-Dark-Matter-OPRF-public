@@ -1,0 +1,6 @@
+# Build for the host CPU so that AVX2/AES-NI/PCLMULQDQ are enabled at compile
+# time. Without this, the AVX2 intrinsics in scuttlebutt (e.g. F82t
+# multiplication) are not inlined, and vectoreyes uses its scalar backend,
+# making the code several times slower.
+[build]
+rustflags = ["-C", "target-cpu=native"]
