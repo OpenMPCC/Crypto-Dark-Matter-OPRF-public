@@ -1,6 +1,7 @@
-use hd_quicksilver::homcom::{FComProver, FComVerifier, MacProver, MacVerifier};
+use hd_quicksilver::{hd_quicksilver::{HDMacProver, HDMacVerifier, QSStateProver, QSStateVerifier}, homcom::{FComProver, FComVerifier, MacProver, MacVerifier}};
 use rand::{CryptoRng, Rng};
-use scuttlebutt::{field::{F128b, F256b, F82t, F3}, ring::FiniteRing, AbstractChannel, Block};
+use scuttlebutt::{field::{polynomial::GeneralPolynomial, F128b, F256b, F82t, F3, FiniteField}, ring::FiniteRing, AbstractChannel};
+use smallvec::smallvec;
 use ocelot::Error;
 
 use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input}, vole_util::*};
@@ -139,7 +140,7 @@ impl Sender for CDMOPRFSender {
         Ok(vec![self.key; m])
     }
 
-	fn compute(&self, seed: Self::Seed, input: Self::Input) -> Self::Output {
+	fn compute(&self, _seed: Self::Seed, _input: Self::Input) -> Self::Output {
     }
 }
 
@@ -189,25 +190,25 @@ impl CDMOPRFReceiver{
         channel: &mut C, 
         rng: &mut RNG,
     )-> Vec<F3> {
-        let (encoded_inputs, batch_size, coms) = self.check_encoded_input(input, channel, rng);
+        let (encoded_inputs, batch_size, coms, qs_prover) = self.check_encoded_input(input, channel, rng);
 
-        let out = w_prf_client_with_commitment(encoded_inputs, batch_size, channel, rng, &mut self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.f3_v, &mut self.fk, &mut self.fk_delta, coms, self.mac_delta_0);
+        let out = w_prf_client_with_commitment(encoded_inputs, batch_size, channel, rng, &mut self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.f3_v, &mut self.fk, &mut self.fk_delta, coms, self.mac_delta_0, qs_prover);
         return out;
     }
 
     pub fn secret_shared_oprf_client<C: AbstractChannel, RNG: CryptoRng + Rng>(
         &mut self,
-        input: Vec<F128b>, 
-        channel: &mut C, 
+        input: Vec<F128b>,
+        channel: &mut C,
         rng: &mut RNG,
     )-> Vec<OPRFSharing<F82t>> {
-        let (encoded_inputs, batch_size, coms) = self.check_encoded_input(input, channel, rng);
+        let (encoded_inputs, batch_size, coms, qs_prover) = self.check_encoded_input(input, channel, rng);
 
-        let out = secret_shared_w_prf_client_with_commitment(encoded_inputs, batch_size, channel, rng, &mut self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.f3_v, &mut self.fk, &mut self.fk_delta, coms, self.mac_delta_0);
+        let out = secret_shared_w_prf_client_with_commitment(encoded_inputs, batch_size, channel, rng, &mut self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.f3_v, &mut self.fk, &mut self.fk_delta, coms, self.mac_delta_0, qs_prover);
         return out;
     }
 
-    fn check_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, input: Vec<F128b>, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, usize, Vec<F256b>) {
+    fn check_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, input: Vec<F128b>, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, usize, Vec<F256b>, QSStateProver<F256b, 2>) {
         let(g, gadget, h) = generate_linear_code();
         let mut encoded_inputs = Vec::with_capacity(input.len());
         for i in input{
@@ -299,7 +300,59 @@ impl CDMOPRFReceiver{
         }
         
         self.f3_p.check_zero(channel, &check_macs).unwrap();
-        (encoded_inputs, batch_size, coms)
+
+        // --- field-inversion countermeasure (writeup Section 6.3) ----------
+        // The weak PRF is evaluated on enc(x)^-1 rather than enc(x). The
+        // client additionally commits to y_inv = encoded_inputs[j]^-1 (same
+        // mechanism as `coms` above) and proves the single degree-2 relation
+        // y * y_inv = 1 against the SAME authentication (coms[j]) already
+        // checked above, so a malicious client cannot swap in an unrelated
+        // value here. y is never zero (the encoding always appends constant
+        // 1-bits), so the inverse is always defined.
+        // (`coms[j]` here is a full-F256b "lifted" IT-MAC key-share, in the sense
+        // of `authenticated_vole_client`'s `input_com` -- not a MacProver<F256b>,
+        // whose PrimeField is F2. The relation is proved the same way that
+        // function proves k*y=z: as a degree-2 HDMac relation over the lifted
+        // pairs, using `fk` purely as the source of masking VOLEs exactly as
+        // `authenticated_vole_client` does.
+        //
+        // This relation is pushed into the SAME QSStateProver that
+        // `authenticated_vole_client` uses for k*y=z, rather than finalized
+        // here on its own: QuickSilver batches arbitrarily many degree-2
+        // relations into one accumulator for the price of a single `finalize`
+        // round trip, so folding the two checks together saves the extra
+        // round trip a second, independent accumulator would cost. The
+        // accumulator (with these relations already pushed) is returned to
+        // the caller, which threads it through to `authenticated_vole_client`
+        // for the combined finalize.)
+        let inv_inputs: Vec<F256b> = encoded_inputs.iter().map(|y| y.inverse()).collect();
+        let coms_inv = w_prf_client_commit_to_input(&inv_inputs, batch_size, channel, rng, &mut self.fk);
+
+        // chi must be a SHARED challenge, and -- since this check is verifying
+        // a claim the CLIENT is making -- it must come from the SERVER, not
+        // be chosen by the client: a batched check like this one only catches
+        // a cheat on a SINGLE relation for any chi (an isolated nonzero
+        // monomial in chi has no nonzero root), but a client who controls
+        // BOTH which values it submits AND chi could coordinate a cheat
+        // across two or more relations and solve for a chi that cancels them
+        // (char-2 fields make such roots easy to find). So wait for the
+        // server's chi here rather than drawing our own.
+        let chi: F256b = channel.read_serializable().unwrap();
+        let mut qs_prover = QSStateProver::<F256b, 2>::init_with_chi(chi);
+        for j in 0..batch_size {
+            let mut hy: HDMacProver<F256b, 2> = HDMacProver {
+                poly: GeneralPolynomial { constant: -coms[j], coefficients: smallvec![encoded_inputs[j]] },
+                qs_degree: 1,
+            };
+            let hyinv: HDMacProver<F256b, 2> = HDMacProver {
+                poly: GeneralPolynomial { constant: -coms_inv[j], coefficients: smallvec![inv_inputs[j]] },
+                qs_degree: 1,
+            };
+            hy.mul_assign(&hyinv);
+            hy.sub_assign_constant(F256b::ONE);
+            qs_prover.check_zero(&hy);
+        }
+        (inv_inputs, batch_size, coms_inv, qs_prover)
             }
 }
 
@@ -311,23 +364,23 @@ impl CDMOPRFSender{
         channel: &mut C, 
         rng: &mut RNG,
     )-> () {
-        let coms = self.check_encoded_input(batch_size, channel, rng);
+        let (coms, qs_verifier) = self.check_encoded_input(batch_size, channel, rng);
 
-        w_prf_server_with_commitment(self.key, batch_size, channel, rng, self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.f3_p, &mut self.fk, &mut self.fk_delta, coms, self.key_delta_0);
+        w_prf_server_with_commitment(self.key, batch_size, channel, rng, self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.f3_p, &mut self.fk, &mut self.fk_delta, coms, self.key_delta_0, qs_verifier);
     }
 
     pub fn secret_shared_oprf_server<C: AbstractChannel, RNG: CryptoRng + Rng>(
         &mut self,
         batch_size: usize,
-        channel: &mut C, 
+        channel: &mut C,
         rng: &mut RNG,
     )-> Vec<OPRFSharing<F82t>> {
-        let coms = self.check_encoded_input(batch_size, channel, rng);
+        let (coms, qs_verifier) = self.check_encoded_input(batch_size, channel, rng);
 
-        secret_shared_w_prf_server_with_commitment(self.key, batch_size, channel, rng, self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.fk, &mut self.fk_delta, coms, self.key_delta_0)
+        secret_shared_w_prf_server_with_commitment(self.key, batch_size, channel, rng, self.b, &mut self.b_tables, &mut self.da_bits, &mut self.f2_p, &mut self.f2_v, &mut self.fk, &mut self.fk_delta, coms, self.key_delta_0, qs_verifier)
     }
 
-    fn check_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, batch_size: usize, channel: &mut C, rng: &mut RNG) -> Vec<F256b> {
+    fn check_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, batch_size: usize, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, QSStateVerifier<F256b>) {
         let n = 256;
         let(_, gadget, h) = generate_linear_code();
         
@@ -403,7 +456,30 @@ impl CDMOPRFSender{
         }
         
         self.f3_v.check_zero(channel, rng, &check_macs).unwrap();
-        coms
+
+        // --- field-inversion countermeasure (writeup Section 6.3), server side
+        // (mirrors authenticate_vole_server's own use of HDMacVerifier/QSStateVerifier
+        // to prove a degree-2 relation over lifted pairs; see the client-side
+        // comment on why this is pushed into a shared accumulator, returned to
+        // the caller, rather than finalized here.)
+        let coms_inv = w_prf_server_commit_to_input(batch_size, channel, rng, &mut self.fk);
+
+        // chi is drawn HERE, by the server, and sent to the client -- see the
+        // client-side comment for why the challenge must come from the party
+        // that is not the one being checked.
+        let delta = self.fk.get_delta();
+        let chi = F256b::random(rng);
+        channel.write_serializable(&chi).unwrap();
+        channel.flush().unwrap();
+        let mut qs_verifier = QSStateVerifier::<F256b>::init_with_delta_and_chi(delta, chi);
+        for j in 0..batch_size {
+            let mut hy: HDMacVerifier<F256b> = HDMacVerifier { mac: -coms[j], qs_degree: 1 };
+            let hyinv: HDMacVerifier<F256b> = HDMacVerifier { mac: -coms_inv[j], qs_degree: 1 };
+            hy.mul_assign(&hyinv);
+            hy.sub_assign_constant(delta, F256b::ONE);
+            qs_verifier.check_zero(&hy);
+        }
+        (coms_inv, qs_verifier)
             }
 }
 
@@ -466,13 +542,72 @@ mod test{
 
         let fk_x = handle.join().unwrap();
 
-        // Verify the output
+        // Verify the output. The field-inversion countermeasure (Section 6.3)
+        // is unconditionally active in check_encoded_input, so the weak PRF
+        // is evaluated on enc(x)^-1 rather than enc(x); see test_oprf_field_inversion.
         let encoded_input = encode_input(input, generate_linear_code().0);
-        let expected_out = w_prf_clear(key, encoded_input, b);
+        let expected_out = w_prf_clear(key, encoded_input.inverse(), b);
         for i in 0..82{
             assert_eq!(fk_x[i], expected_out[i], "Mismatch at index {}", i);
         }
 
+    }
+
+    /// The field-inversion countermeasure (writeup Section 6.3): the protocol
+    /// runs end to end exactly as in `test_oprf` (so this also exercises the
+    /// new degree-2 relation check on every call), but the weak PRF is now
+    /// evaluated on enc(x)^-1 rather than enc(x). Checks both that the output
+    /// matches `w_prf_clear` on the INVERTED encoding, and -- as a sanity
+    /// check that the countermeasure is actually active and not a no-op --
+    /// that it does NOT match `w_prf_clear` on the un-inverted encoding.
+    #[test]
+    fn test_oprf_field_inversion() {
+        let seed = Block::from([0; 16]);
+
+        let mut b_rng = AesRng::from_seed(seed);
+        let mut b: [[F3; 256];82] = [[F3::ZERO; 256]; 82];
+        for i in 0..82 {
+            for j in 0..256 {
+                b[i][j] = F3::random(&mut b_rng);
+            }
+        }
+
+        let bc = generate_precompute_tables(b);
+        let bs = bc.clone();
+
+        let input = F128b::random(&mut b_rng);
+        let (client, server) = UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(seed);
+            let reader = BufReader::new(client.try_clone().unwrap());
+            let writer = BufWriter::new(client);
+            let mut channel = Channel::new(reader, writer);
+            let inputs = vec![input];
+
+            let mut cdmoprfreceiver = init_cdm_oprf_receiver(&mut channel, &mut rng, inputs.len(), b, bc, OPRFSetting::RevealOutput);
+            let out = cdmoprfreceiver.oprf_client(inputs, &mut channel, &mut rng);
+            out
+        });
+
+        let mut rng = AesRng::from_seed(seed);
+        let reader = BufReader::new(server.try_clone().unwrap());
+        let writer = BufWriter::new(server);
+        let mut channel = Channel::new(reader, writer);
+
+        let batch_size = 1;
+        let mut cdmoprfsender = init_cdm_oprf_sender(&mut channel, &mut rng, batch_size, b, bs, OPRFSetting::RevealOutput);
+        let key = cdmoprfsender.fk.get_delta();
+        cdmoprfsender.oprf_server(batch_size, &mut channel, &mut rng);
+
+        let fk_x = handle.join().unwrap();
+
+        let encoded_input = encode_input(input, generate_linear_code().0);
+        let expected_inverted = w_prf_clear(key, encoded_input.inverse(), b);
+        let expected_plain = w_prf_clear(key, encoded_input, b);
+        for i in 0..82 {
+            assert_eq!(fk_x[i], expected_inverted[i], "Mismatch at index {} against w_prf_clear(k, y^-1, B)", i);
+        }
+        assert_ne!(fk_x, expected_plain, "output matches the UN-inverted encoding -- countermeasure is not active");
     }
 
     #[test]
@@ -524,7 +659,7 @@ mod test{
             // Verify the output
         for j in 0..batch_size{
             let encoded_input = encode_input(inputs[j].clone(), generate_linear_code().0);
-            let expected_output = w_prf_clear(key, encoded_input, b);
+            let expected_output = w_prf_clear(key, encoded_input.inverse(), b);
             for i in 0..82{
                 assert_eq!(fk_x[i + 82*j], expected_output[i], "Mismatch at index {}, {}", i, j);
             }
@@ -581,7 +716,7 @@ mod test{
         // Verify the output
         for j in 0..batch_size{
             let encoded_input = encode_input(inputs[j].clone(), generate_linear_code().0);
-            let expected_output = w_prf_clear(key, encoded_input, b);
+            let expected_output = w_prf_clear(key, encoded_input.inverse(), b);
             for i in 0..82{
                 assert_eq!(fk_x_server[j*82 + i].0 + fk_x_client[j*82 + i].0, expected_output[i], "Mismatch at index {}, {}", i, j);
                 assert_eq!(fk_x_client[j*82 + i].2.mac(), -fk_x_server[j*82 + i].0*c_delta + fk_x_server[j*82 + i].1.mac(), "Mac mismatch at index {}, {}", i, j);
@@ -677,7 +812,7 @@ mod test{
 
 		// === Verify correctness ===
 		let encoded = encode_input(input, generate_linear_code().0);
-		let expected = w_prf_clear(key, encoded, b);
+		let expected = w_prf_clear(key, encoded.inverse(), b);
 
 		for i in 0..82 {
 			assert_eq!(

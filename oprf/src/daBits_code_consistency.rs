@@ -140,7 +140,7 @@ Fp::PrimeField: TryFrom<u8>
 
     for i in 0..v3.len(){
         let mut prod_left: HDMacProver<Fp, 2> = v3[i].into();
-        let mut prod_right: HDMacProver<Fp, 2> = v3[i].into();
+        let prod_right: HDMacProver<Fp, 2> = v3[i].into();
         let mut one: HDMacProver<Fp, 2_> = HDMacProver::new_constant(Fp::ONE);
         one.sub_assign(&prod_right);
         prod_left.mul_assign(&one);
@@ -325,7 +325,7 @@ Fp::PrimeField: TryFrom<u8>{
     let mut qs_verifier = QSStateVerifier::<Fp>::init_with_delta_and_chi(delta, chi);
     for i in 0..v3.len(){
         let mut prod_left: HDMacVerifier<Fp> = v3[i].into();
-        let mut prod_right: HDMacVerifier<Fp> = v3[i].into();
+        let prod_right: HDMacVerifier<Fp> = v3[i].into();
         let mut one: HDMacVerifier<Fp> = HDMacVerifier::new_constant(delta, Fp::ONE);
         one.sub_assign(delta, &prod_right);
         prod_left.mul_assign(&one);

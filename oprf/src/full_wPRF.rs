@@ -28,7 +28,7 @@ where Fp::PrimeField: TryFrom<u8>
     let (lpn_setup_params_f2, lpn_extend_params_f2) = choose_lpn_parameters::<F256b>(batch_size*n*2);
     let mut fcom_v_2 = FComVerifier::<F256b>::init_from_previous_setup_receiver(channel, rng, lpn_setup_params_f2, lpn_extend_params_f2, a).unwrap();
 
-    let (fcom_k_params, fcom_k_params_extend) = choose_lpn_parameters::<F256b>(batch_size*n*2 + 512);
+    let (fcom_k_params, fcom_k_params_extend) = choose_lpn_parameters::<F256b>(batch_size*n*3 + 512);
     let mut fcom_k = FComProver::<F256b>::init_from_previous_setup_receiver(channel, rng, fcom_k_params, fcom_k_params_extend, a).unwrap();
 
     let (lpn_share_setup_params, lpn_share_extend_params) = choose_lpn_parameters::<F256b>(batch_size*n);
@@ -176,7 +176,7 @@ Fp::PrimeField: TryFrom<u8>
     let (lpn_setup_params_f2, lpn_extend_params_f2) = choose_lpn_parameters::<F256b>(batch_size*n*2);
     let mut fcom_p_2 = FComProver::<F256b>::init_from_previous_setup_sender(channel, rng, lpn_setup_params_f2, lpn_extend_params_f2, a ).unwrap();
 
-    let (fcom_k_params, fcom_k_params_extend) = choose_lpn_parameters::<F256b>(batch_size*n*2 + 512);
+    let (fcom_k_params, fcom_k_params_extend) = choose_lpn_parameters::<F256b>(batch_size*n*3 + 512);
     let mut fcom_k: FComVerifier<F256b> = FComVerifier::<F256b>::init_from_previous_setup_sender(channel, rng, fcom_k_params, fcom_k_params_extend, a).unwrap();
 
     let (lpn_share_setup_params, lpn_share_extend_params) = choose_lpn_parameters::<F256b>(batch_size*n);
@@ -334,7 +334,29 @@ pub fn w_prf_client<C: AbstractChannel, RNG: CryptoRng + Rng>(
     mac_delta: F256b,
 ) -> Vec<F3>{
     let value_client_share = w_prf_client_commit_to_input(&inputs, batch_size, channel, rng, fcom_k);
-    w_prf_client_with_commitment(inputs, batch_size, channel, rng, b, b_tables, da_bits, fcom_p_2, fcom_v_2, fcom_v_3, fcom_k, fcom_k_delta, value_client_share, mac_delta)
+    // Bypasses check_encoded_input (and so the field-inversion countermeasure)
+    // entirely -- this exercises the weak PRF layer directly on raw F256b
+    // inputs. qs_prover carries no relations yet, matching the plain k*y=z
+    // check authenticated_vole_client used to set up internally.
+    //
+    // chi must be a SHARED challenge: drawing it independently from `rng` on
+    // each side (as authenticated_vole_client/authenticate_vole_server do
+    // internally) only happens to match when the two sides' RNGs are
+    // otherwise perfectly lockstepped, which is NOT guaranteed in general --
+    // preprocess_client/preprocess_server's internal OT/VOLE setup consumes
+    // randomness asymmetrically between prover and verifier roles, so by the
+    // time this function runs the two `rng`s have already diverged.
+    //
+    // It must also come from the SERVER specifically, not be chosen by this
+    // (client/prover) side: a batched check like this one only catches a
+    // cheat on a single relation for any chi (an isolated nonzero monomial in
+    // chi has no nonzero root), but a prover who controls both which values
+    // it submits and chi could coordinate a cheat across two or more
+    // relations and solve for a chi that cancels them (char-2 fields make
+    // such roots easy to find). So wait for it here instead of drawing it.
+    let chi: F256b = channel.read_serializable().unwrap();
+    let qs_prover = QSStateProver::<F256b, 2>::init_with_chi(chi);
+    w_prf_client_with_commitment(inputs, batch_size, channel, rng, b, b_tables, da_bits, fcom_p_2, fcom_v_2, fcom_v_3, fcom_k, fcom_k_delta, value_client_share, mac_delta, qs_prover)
 }
 
 pub fn w_prf_client_with_commitment<C: AbstractChannel, RNG: CryptoRng + Rng>(
@@ -352,16 +374,17 @@ pub fn w_prf_client_with_commitment<C: AbstractChannel, RNG: CryptoRng + Rng>(
     fcom_k_delta: &mut FComProver<F256b>,
     input_com: Vec<F256b>,
     mac_delta: F256b,
+    qs_prover: QSStateProver<F256b, 2>,
 ) -> Vec<F3>{
     let n = 256;
     let t = 82;
 
     assert_eq!(inputs.len(), batch_size, "Inputs length does not match batch size");
 
-    let (value_client_share, mac_client_share, key_server_share) = authenticated_vole_client(inputs, batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, input_com, mac_delta, n);
+    let (value_client_share, mac_client_share, key_server_share) = authenticated_vole_client(inputs, batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, input_com, mac_delta, n, qs_prover);
 
     let c = open_c_client(batch_size, channel, da_bits, fcom_v_2, value_client_share, mac_client_share, key_server_share);
-    
+
     let out = convert_and_reveal_client(batch_size, channel, b, b_tables, da_bits, fcom_v_3, n, t, c);
     out
 }
@@ -381,16 +404,17 @@ pub fn secret_shared_w_prf_client_with_commitment<C: AbstractChannel, RNG: Crypt
     fcom_k_delta: &mut FComProver<F256b>,
     input_com: Vec<F256b>,
     mac_delta: F256b,
+    qs_prover: QSStateProver<F256b, 2>,
 ) -> Vec<OPRFSharing<F82t>>{
     let n = 256;
     let t = 82;
 
     assert_eq!(inputs.len(), batch_size, "Inputs length does not match batch size");
 
-    let (value_client_share, mac_client_share, key_server_share) = authenticated_vole_client(inputs, batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, input_com, mac_delta, n);
+    let (value_client_share, mac_client_share, key_server_share) = authenticated_vole_client(inputs, batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, input_com, mac_delta, n, qs_prover);
 
     let c = open_c_client(batch_size, channel, da_bits, fcom_v_2, value_client_share, mac_client_share, key_server_share);
-    
+
     let out = convert_client(batch_size, b, b_tables, da_bits, fcom_v_3, n, t, c);
     out
 }
@@ -543,15 +567,17 @@ fn open_c_client<C: AbstractChannel>
 }
 
 fn authenticated_vole_client<C: AbstractChannel, RNG: CryptoRng + Rng>
-(inputs: Vec<F256b>, batch_size: usize, channel: &mut C, rng: &mut RNG, fcom_p_2: &mut FComProver<F256b>, fcom_v_2: &mut FComVerifier<F256b>, fcom_k: &mut FComProver<F256b>, fcom_k_delta: &mut FComProver<F256b>, input_com: Vec<F256b>, mac_delta: F256b, n: usize) -> (Vec<F256b>, Vec<F256b>, Vec<F256b>) {
+(inputs: Vec<F256b>, batch_size: usize, channel: &mut C, rng: &mut RNG, fcom_p_2: &mut FComProver<F256b>, fcom_v_2: &mut FComVerifier<F256b>, fcom_k: &mut FComProver<F256b>, fcom_k_delta: &mut FComProver<F256b>, input_com: Vec<F256b>, mac_delta: F256b, n: usize, mut qs_prover: QSStateProver<F256b, 2>) -> (Vec<F256b>, Vec<F256b>, Vec<F256b>) {
     // Online phase
     let mut value_client_share = Vec::with_capacity(batch_size);
     let mut mac_client_share = Vec::with_capacity(batch_size);
     let mut key_server_share = Vec::with_capacity(batch_size);
-    
-    // Checks
-    let chi = F256b::random(rng);
-    let mut qs_prover = QSStateProver::<F256b, 2>::init_with_chi(chi);
+
+    // Checks. `qs_prover` is passed in already carrying the field-inversion
+    // countermeasure's y*y_inv=1 relations (see OPRF.rs::check_encoded_input);
+    // the k*y=z relations pushed below join the same accumulator, so the
+    // `finalize` call at the end of this function verifies both in one round
+    // trip instead of two.
     let s: F256b = F256b::random(rng);
 
     for j in 0..batch_size{        
@@ -635,7 +661,16 @@ pub fn w_prf_server<C: AbstractChannel, RNG: CryptoRng + Rng>(
     key_delta: F256b,
 ) -> () {
     let value_server_share = w_prf_server_commit_to_input(batch_size, channel, rng, fcom_k);
-    w_prf_server_with_commitment(key, batch_size, channel, rng, b, b_tables, da_bits, fcom_p_2, fcom_v_2, fcom_p_3, fcom_k, fcom_k_delta, value_server_share, key_delta);
+    // Mirrors w_prf_client's bypass of check_encoded_input; see its comment
+    // there on why chi is exchanged explicitly, and why it's drawn HERE by
+    // the server (the party verifying the client's claims) and sent to the
+    // client, rather than the other way around.
+    let delta = fcom_k.get_delta();
+    let chi = F256b::random(rng);
+    channel.write_serializable(&chi).unwrap();
+    channel.flush().unwrap();
+    let qs_verifier = QSStateVerifier::<F256b>::init_with_delta_and_chi(delta, chi);
+    w_prf_server_with_commitment(key, batch_size, channel, rng, b, b_tables, da_bits, fcom_p_2, fcom_v_2, fcom_p_3, fcom_k, fcom_k_delta, value_server_share, key_delta, qs_verifier);
 }
 
 pub fn secret_shared_w_prf_server<C: AbstractChannel, RNG: CryptoRng + Rng>(
@@ -653,7 +688,17 @@ pub fn secret_shared_w_prf_server<C: AbstractChannel, RNG: CryptoRng + Rng>(
     key_delta: F256b,
 ) -> Vec<OPRFSharing<F82t>> {
     let value_server_share = w_prf_server_commit_to_input(batch_size, channel, rng, fcom_k);
-    secret_shared_w_prf_server_with_commitment(key, batch_size, channel, rng, b, b_tables, da_bits, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, value_server_share, key_delta)
+    // NOTE: this function has no caller anywhere in the crate (no
+    // corresponding bare `secret_shared_w_prf_client`, and nothing else
+    // invokes it), so unlike w_prf_server there is no live counterpart to
+    // exchange chi with over the channel; it is left drawing chi locally as
+    // before. See w_prf_server's comment on why that lockstep assumption is
+    // NOT safe in general -- this path is untested and should not be trusted
+    // without the same explicit-exchange fix if it is ever wired up to a caller.
+    let delta = fcom_k.get_delta();
+    let chi = F256b::random(rng);
+    let qs_verifier = QSStateVerifier::<F256b>::init_with_delta_and_chi(delta, chi);
+    secret_shared_w_prf_server_with_commitment(key, batch_size, channel, rng, b, b_tables, da_bits, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, value_server_share, key_delta, qs_verifier)
 }
 
 pub fn w_prf_server_with_commitment<C: AbstractChannel, RNG: CryptoRng + Rng>(
@@ -671,11 +716,12 @@ pub fn w_prf_server_with_commitment<C: AbstractChannel, RNG: CryptoRng + Rng>(
     fcom_k_delta: &mut FComVerifier<F256b>,
     value_server_share: Vec<F256b>,
     key_delta: F256b,
+    qs_verifier: QSStateVerifier<F256b>,
 ) -> (){
     let n = 256;
     let t = 82;
 
-    let (mac_server_share, key_client_share) = authenticate_vole_server(batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, &value_server_share, key_delta, n);
+    let (mac_server_share, key_client_share) = authenticate_vole_server(batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, &value_server_share, key_delta, n, qs_verifier);
 
     let c = open_c_server(batch_size, channel, da_bits, fcom_v_2, value_server_share, mac_server_share, key_client_share);
 
@@ -696,11 +742,12 @@ pub fn secret_shared_w_prf_server_with_commitment<C: AbstractChannel, RNG: Crypt
     fcom_k_delta: &mut FComVerifier<F256b>,
     value_server_share: Vec<F256b>,
     key_delta: F256b,
+    qs_verifier: QSStateVerifier<F256b>,
 ) -> Vec<OPRFSharing<F82t>>{
     let n = 256;
     let t = 82;
 
-    let (mac_server_share, key_client_share) = authenticate_vole_server(batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, &value_server_share, key_delta, n);
+    let (mac_server_share, key_client_share) = authenticate_vole_server(batch_size, channel, rng, fcom_p_2, fcom_v_2, fcom_k, fcom_k_delta, &value_server_share, key_delta, n, qs_verifier);
 
     let c = open_c_server(batch_size, channel, da_bits, fcom_v_2, value_server_share, mac_server_share, key_client_share);
 
@@ -841,14 +888,15 @@ fn open_c_server<C: AbstractChannel>(batch_size: usize, channel: &mut C, da_bits
     c
 }
 
-fn authenticate_vole_server<C: AbstractChannel, RNG: CryptoRng + Rng>(batch_size: usize, channel: &mut C, rng: &mut RNG, fcom_p_2: &mut FComProver<F256b>, fcom_v_2: &mut FComVerifier<F256b>, fcom_k: &mut FComVerifier<F256b>, fcom_k_delta: &mut FComVerifier<F256b>, value_server_share: &Vec<F256b>, key_delta: F256b, n: usize) -> (Vec<F256b>, Vec<F256b>) {
+fn authenticate_vole_server<C: AbstractChannel, RNG: CryptoRng + Rng>(batch_size: usize, channel: &mut C, rng: &mut RNG, fcom_p_2: &mut FComProver<F256b>, fcom_v_2: &mut FComVerifier<F256b>, fcom_k: &mut FComVerifier<F256b>, fcom_k_delta: &mut FComVerifier<F256b>, value_server_share: &Vec<F256b>, key_delta: F256b, n: usize, mut qs_verifier: QSStateVerifier<F256b>) -> (Vec<F256b>, Vec<F256b>) {
     let mut mac_server_share = Vec::with_capacity(batch_size);
     let mut key_client_share = Vec::with_capacity(batch_size);
 
-    let delta =  fcom_k.get_delta();
-    let chi = F256b::random(rng);
-    let mut qs_verifier = QSStateVerifier::<F256b>::init_with_delta_and_chi(delta, chi);
-
+    // `qs_verifier` is passed in already carrying the field-inversion
+    // countermeasure's y*y_inv=1 relations (see OPRF.rs::check_encoded_input);
+    // the k*y=z relations pushed below join the same accumulator, so the
+    // `finalize_and_verify` call at the end of this function checks both in
+    // one round trip instead of two.
     for j in 0..batch_size{
         // authenticate client share
         let mut z_1 = lift_verifier_vole(fcom_k_delta, channel, rng, n);
@@ -870,7 +918,10 @@ fn authenticate_vole_server<C: AbstractChannel, RNG: CryptoRng + Rng>(batch_size
         delta.sub_assign(fcom_k.get_delta(), &delta_y);
         qs_verifier.check_zero(&delta);
     }
-    qs_verifier.finalize_and_verify::<C, RNG, 2>(channel, rng, fcom_k).unwrap();
+    assert!(
+        qs_verifier.finalize_and_verify::<C, RNG, 2>(channel, rng, fcom_k).unwrap(),
+        "quicksilver check failed (k*y=z and/or field-inversion y*y_inv=1 relation)"
+    );
     {
         let mut f = lift_verifier_vole(fcom_k, channel, rng, n);
         let d: F256b = channel.read_serializable().unwrap();
