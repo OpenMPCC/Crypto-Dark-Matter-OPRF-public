@@ -272,7 +272,7 @@ impl CDMOPRFReceiver{
             }
         
             // Convert to F3
-            for i in 0..2{
+            for i in 254..256{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
                 let mac = dabit3_i.mac() + c_i * dabit3_i.mac();
@@ -281,7 +281,7 @@ impl CDMOPRFReceiver{
                 check_macs.push(mac);
             }
         
-            for i in 2..256{
+            for i in 0..254{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
         
@@ -290,7 +290,6 @@ impl CDMOPRFReceiver{
                 mac_f3.push(mac);
             }
         
-            mac_f3.reverse();
 
             // each parity cell must be valid: b0 * b1 = 0, proved on the F2
             // MACs of the same bits, where multiplication is much cheaper
@@ -391,7 +390,7 @@ impl CDMOPRFSender{
                 c_bit_string[i+128] = F3{msb: 0, lsb: value as u8};
             }
             // Convert to F3
-            for i in 0..2{
+            for i in 254..256{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
         
@@ -401,7 +400,7 @@ impl CDMOPRFSender{
                 check_macs.push(mac);
             }
         
-            for i in 2..256{
+            for i in 0..254{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
         
@@ -409,7 +408,6 @@ impl CDMOPRFSender{
                 mac_f3.push(mac);
             }
 
-            mac_f3.reverse();
 
             // each parity cell must be valid: b0 * b1 = 0, proved on the F2
             // MACs of the same bits, where multiplication is much cheaper

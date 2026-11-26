@@ -6,32 +6,43 @@ use scuttlebutt::{field::{F128b, F256b, F64t, F82t, FiniteField, F2, F3}, ring::
 pub const D: usize = 128;
 pub const N_PRIME: usize = 128 + 63;
 
+/// Lays out x || b1(z) || b0(z), where z = 2*b1(z) + b0(z) are the parities.
 pub fn decompose(input: [F3; N_PRIME]) -> [F2; D + 2*(N_PRIME-D)]{
     let mut decompose = [F2::ZERO; D + 2*(N_PRIME-D)];
     for i in 0..D {
         let u8_value: u8 = input[i].into();
-        decompose[(N_PRIME - D) + i] = F2::try_from(u8_value).unwrap();
+        decompose[i] = F2::try_from(u8_value).unwrap();
     }
     for i in 0..(N_PRIME - D) {
         let u8_value: u8 = input[D + i].into();
-        decompose[i] = F2::try_from((u8_value >> 1) & 1).unwrap();
-        decompose[N_PRIME - D + i + D] = F2::try_from(u8_value & 1).unwrap();
+        decompose[D + i] = F2::try_from((u8_value >> 1) & 1).unwrap();
+        decompose[N_PRIME + i] = F2::try_from(u8_value & 1).unwrap();
     }
     decompose
 }
 
-/// Coefficients of alpha holding the two bits of parity cell `i` in an
-/// encoded input (`encode_input` stores bit k of `decompose` at alpha^(255-k)).
+/// Positions of the two bits of parity cell `i` in the output of `decompose`,
+/// which are also their coefficients of alpha in an encoded input.
 /// A valid cell is (0, 0), (1, 0) or (0, 1); the gadget maps the invalid cell
 /// (1, 1) to 2 + 1 = 0, so the input check must also prove b0 * b1 = 0.
 pub fn parity_cell(i: usize) -> (usize, usize) {
-    (255 - i, 255 - (N_PRIME + i))
+    (D + i, N_PRIME + i)
 }
 
 /// Coefficient of alpha^p in `y`.
 pub fn coefficient_bit(y: &F256b, p: usize) -> F2 {
     let word = if p < 128 { y.low >> p } else { y.high >> (p - 128) };
     F2::try_from((word & 1) as u8).unwrap()
+}
+
+/// Rearranges x || b1 || b0 into 0^D || b1 || x || b0, so that row i of the
+/// gadget weighs entry i by 2 and entry N_PRIME + i by 1.
+fn extend_for_gadget<T: FiniteRing + Copy>(input: &[T; D + 2*(N_PRIME-D)]) -> [T; 2*N_PRIME] {
+    let mut extended_input = [T::ZERO; 2*N_PRIME];
+    extended_input[D..N_PRIME].copy_from_slice(&input[D..N_PRIME]);
+    extended_input[N_PRIME..N_PRIME + D].copy_from_slice(&input[..D]);
+    extended_input[N_PRIME + D..].copy_from_slice(&input[N_PRIME..]);
+    extended_input
 }
 
 pub fn apply_gadget_convert<Fb: FiniteRing, Fp: FiniteRing>(input: [Fb; D + 2*(N_PRIME-D)], gadget: [[Fp; 2*(N_PRIME)]; N_PRIME])
@@ -41,13 +52,7 @@ where
     Fp: TryFrom<u8>,
 {
     let mut output = [Fp::ZERO; N_PRIME];
-    let mut extended_input = [Fb::ZERO; 2*(128+63)];
-    for i in 0..D{
-        extended_input[i] = Fb::ZERO;
-    }
-    for i in D..2*N_PRIME{
-        extended_input[i] = input[i - D];
-    }
+    let extended_input = extend_for_gadget(&input);
 
     for i in 0..N_PRIME{
         let mut value_i = Fp::ZERO;
@@ -76,10 +81,7 @@ pub fn apply_gadget<F: FiniteField>(input: [F; D + 2*(N_PRIME-D)], gadget: [[F3;
 where scuttlebutt::field::F3: std::ops::Mul<F, Output = F>
 {
     let mut output = [F::ZERO; N_PRIME];
-    let mut extended_input = [F::ZERO; 2*(128+63)];
-    for i in D..2*N_PRIME{
-        extended_input[i] = input[i - D];
-    }
+    let extended_input = extend_for_gadget(&input);
 
     for i in 0..N_PRIME{
         let g_2 = gadget[i][i];
@@ -160,12 +162,12 @@ pub fn encode_input(input: F128b, g: [[F3; D]; N_PRIME]) -> F256b{
     decompose_vec.push(F2::ONE); // Append 1 to match d+2*(n' - d) + 2 = power of 2
     assert_eq!(decompose_vec.len(), 256);
 
-    // Convert into F256b
+    // Convert into F256b, entry k being the coefficient of alpha^k
     let mut low = 0u128;
     let mut high = 0u128;
     for i in 0..128{
-        low |= (u8::from(decompose_vec[i+128]) as u128) << (127-i);
-        high |= (u8::from(decompose_vec[i]) as u128) << (127-i);
+        low |= (u8::from(decompose_vec[i]) as u128) << i;
+        high |= (u8::from(decompose_vec[i+128]) as u128) << i;
     }
 
     F256b{high, low}
@@ -274,6 +276,12 @@ mod test{
             let input = F128b::random(&mut rng);
             let encoded = encode_input(input, g);
             let x: u128 = input.into();
+            // encoded input is x || b1(z) || b0(z) || 1 || 1, entry k at alpha^k
+            for i in 0..D{
+                assert_eq!(coefficient_bit(&encoded, i), F2::try_from(((x >> i) & 1) as u8).unwrap(), "Input bit {}", i);
+            }
+            assert_eq!(coefficient_bit(&encoded, 254), F2::ONE);
+            assert_eq!(coefficient_bit(&encoded, 255), F2::ONE);
             for i in 0..(N_PRIME - D){
                 let mut z = F3::ZERO;
                 for j in 0..D{
@@ -297,11 +305,8 @@ mod test{
             let input = F128b::random(&mut rng);
             let encoded = encode_input(input, g);
             let mut decomp_encoded = [F2::ZERO; D + 2*(N_PRIME - D)];
-            for i in 0..D {
-                decomp_encoded[i] = F2::try_from((encoded.high >> (127-i)) & 1).unwrap();
-            }
-            for i in D..(D + 2*(N_PRIME - D)) {
-                decomp_encoded[i] = F2::try_from((encoded.low >> (127-(i - D))) & 1).unwrap();
+            for i in 0..(D + 2*(N_PRIME - D)) {
+                decomp_encoded[i] = coefficient_bit(&encoded, i);
             }
 
             let gadget = apply_gadget_convert(decomp_encoded, g_gadget);
