@@ -24,6 +24,14 @@ The goal of this repository is to:
 Artefacts are currently considered **research prototypes** and not audited for security. Do not deploy it in
 production, or entrust it with actual sensitive data as-is.
 
+## Changes since the paper
+
+The last version with the input encoding of the original implementation is tagged `sp26-published`. Since then:
+
+* **Input check fix.** The input check accepted the invalid parity cell `(1, 1)` wherever the parity is 0, because the gadget maps it to `2 + 1 = 0 mod 3`. The client now also proves `b0 * b1 = 0` for every parity cell, with one batched QuickSilver check over F2. The online overhead is within measurement noise for batches of 16 or more inputs.
+* **Canonical input encoding.** An input is now encoded as `x || b1(z) || b0(z) || 1 || 1`, where `z = 2*b1(z) + b0(z)` are the parities and entry `k` is the coefficient of `alpha^k`, as specified in the revised paper. **This changes every PRF output** compared to `sp26-published`.
+* **Open issue: two-query key recovery.** Shin, Kim, Hong and Lee ([ePrint 2026/2928](https://eprint.iacr.org/2026/2928)) find pairs of inputs whose encodings differ by a factor `alpha^2` and recover the key from two queries, at an estimated cost of about 2^66 for the proposed parameters. This attack is not yet addressed, so the strong PRF does not currently reach its claimed 128-bit security.
+
 ## Clearance
 
 The content in this repository has been:
