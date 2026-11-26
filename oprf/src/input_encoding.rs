@@ -20,6 +20,13 @@ pub fn decompose(input: [F3; N_PRIME]) -> [F2; D + 2*(N_PRIME-D)]{
     decompose
 }
 
+/// Positions of the two bits of parity cell `i` in the output of `decompose`.
+/// A valid cell is (0, 0), (1, 0) or (0, 1); the gadget maps the invalid cell
+/// (1, 1) to 2 + 1 = 0, so the input check must also prove b0 * b1 = 0.
+pub fn parity_cell(i: usize) -> (usize, usize) {
+    (i, N_PRIME + i)
+}
+
 pub fn apply_gadget_convert<Fb: FiniteRing, Fp: FiniteRing>(input: [Fb; D + 2*(N_PRIME-D)], gadget: [[Fp; 2*(N_PRIME)]; N_PRIME])
 -> [Fp; N_PRIME]
 where 

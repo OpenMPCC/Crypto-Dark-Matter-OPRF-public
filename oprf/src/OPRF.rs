@@ -3,7 +3,7 @@ use rand::{CryptoRng, Rng};
 use scuttlebutt::{field::{F128b, F256b, F82t, F3}, ring::FiniteRing, AbstractChannel, Block};
 use ocelot::Error;
 
-use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input}, vole_util::*};
+use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input, parity_cell, D, N_PRIME}, vole_util::*};
 use crate::{matrix_util::generate_precompute_tables, preprocessing::{init_cdm_oprf_receiver, init_cdm_oprf_sender}};
 
 /// Trait containing the associated types used by an oblivious PRF.
@@ -208,12 +208,17 @@ impl CDMOPRFReceiver{
     }
 
     fn check_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, input: Vec<F128b>, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, usize, Vec<F256b>) {
-        let(g, gadget, h) = generate_linear_code();
+        let (g, _, _) = generate_linear_code();
         let mut encoded_inputs = Vec::with_capacity(input.len());
         for i in input{
             let encoded = encode_input(i, g);
             encoded_inputs.push(encoded);
         }
+        self.prove_encoded_input(encoded_inputs, channel, rng)
+    }
+
+    fn prove_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, encoded_inputs: Vec<F256b>, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, usize, Vec<F256b>) {
+        let (_, gadget, h) = generate_linear_code();
         let batch_size = encoded_inputs.len();
             
         let n = 256;
@@ -254,10 +259,12 @@ impl CDMOPRFReceiver{
         
         // Convert mac to F3 and apply gadget & H
         let mut check_macs = Vec::with_capacity(batch_size);
+        let mut cell_triples = Vec::with_capacity(batch_size * (N_PRIME - D));
         let mut c_bit_string = [F3::ZERO; 256];
         for j in 0..batch_size{
             let mut mac_f3 = Vec::with_capacity(254);
-        
+            let mut val_f3 = Vec::with_capacity(254);
+
             for i in 0..128{
                 let value = (c_to_open[j].low >> i) & 1;
                 c_bit_string[i] = F3{msb: 0, lsb: value as u8};
@@ -282,23 +289,37 @@ impl CDMOPRFReceiver{
         
                 let mac = dabit3_i.mac() + c_i * dabit3_i.mac();
                 mac_f3.push(mac);
+                // c XOR bit = c + (1 + c) * bit over F3
+                val_f3.push(c_i + (F3::ONE + c_i) * dabit3_i.value());
             }
-        
+
             mac_f3.reverse();
-        
+            val_f3.reverse();
+
+            // each parity cell must be valid: b0 * b1 = 0
+            for i in 0..(N_PRIME - D){
+                let (b0, b1) = parity_cell(i);
+                cell_triples.push((
+                    MacProver::new(val_f3[b0], mac_f3[b0]),
+                    MacProver::new(val_f3[b1], mac_f3[b1]),
+                    MacProver::new(F3::ZERO, F82t::ZERO),
+                ));
+            }
+
             // apply gadget
             let gadget_out = apply_gadget(mac_f3.try_into().unwrap(), gadget);
-        
+
             // apply H
             let check_matrix: [F82t; 63] = apply_parity_check_matrix_f82t(gadget_out, h);
             for i in 0..63{
                 check_macs.push(MacProver::new(F3::ZERO,check_matrix[i]));
             }
-        
-        
+
+
         }
-        
+
         self.f3_p.check_zero(channel, &check_macs).unwrap();
+        self.f3_p.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
         (encoded_inputs, batch_size, coms)
             }
 }
@@ -361,10 +382,11 @@ impl CDMOPRFSender{
         
         // Convert mac to F3 and apply gadget & H
         let mut check_macs = Vec::with_capacity(batch_size);
+        let mut cell_triples = Vec::with_capacity(batch_size * (N_PRIME - D));
         let mut c_bit_string = [F3::ZERO; 256];
         for j in 0..batch_size{
             let mut mac_f3 = Vec::with_capacity(254);
-            
+
             for i in 0..128{
                 let value = (c_values[j].low >> i) & 1;
                 c_bit_string[i] = F3{msb: 0, lsb: value as u8};
@@ -389,9 +411,19 @@ impl CDMOPRFSender{
                 let mac = -(c_i*self.f3_v.get_delta()) + dabit3_i.mac() + c_i * dabit3_i.mac();
                 mac_f3.push(mac);
             }
-        
+
             mac_f3.reverse();
-        
+
+            // each parity cell must be valid: b0 * b1 = 0
+            for i in 0..(N_PRIME - D){
+                let (b0, b1) = parity_cell(i);
+                cell_triples.push((
+                    MacVerifier::new(mac_f3[b0]),
+                    MacVerifier::new(mac_f3[b1]),
+                    MacVerifier::new(F82t::ZERO),
+                ));
+            }
+
             // apply gadget
             let gadget_out = apply_gadget(mac_f3.try_into().unwrap(), gadget);
         
@@ -403,6 +435,7 @@ impl CDMOPRFSender{
         }
         
         self.f3_v.check_zero(channel, rng, &check_macs).unwrap();
+        self.f3_v.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
         coms
             }
 }
@@ -688,4 +721,56 @@ mod test{
 			);
 		}
 	}
+
+    /// Bit `k` of the decomposed encoding, laid out as in `encode_input`.
+    fn decomposed_bit(y: &F256b, k: usize) -> u128 {
+        if k < 128 { (y.high >> (127 - k)) & 1 } else { (y.low >> (255 - k)) & 1 }
+    }
+
+    fn set_decomposed_bit(y: &mut F256b, k: usize) {
+        if k < 128 { y.high |= 1 << (127 - k); } else { y.low |= 1 << (255 - k); }
+    }
+
+    #[test]
+    fn test_reject_invalid_parity_cell() {
+        // The gadget maps a parity cell (b0, b1) to 2*b0 + b1, so the invalid
+        // cell (1, 1) decodes to 0 and passes the parity check wherever the
+        // parity is 0. A malicious client sends such a word.
+        let seed = Block::from([0; 16]);
+        let (b, bc) = crate::matrix_util::generate_fixed_b();
+        let bs = bc.clone();
+
+        let mut b_rng = AesRng::from_seed(seed);
+        let mut encoded = encode_input(F128b::random(&mut b_rng), generate_linear_code().0);
+        let (b0, b1) = (0..N_PRIME - D)
+            .map(parity_cell)
+            .find(|&(b0, b1)| decomposed_bit(&encoded, b0) == 0 && decomposed_bit(&encoded, b1) == 0)
+            .expect("no zero parity cell");
+        set_decomposed_bit(&mut encoded, b0);
+        set_decomposed_bit(&mut encoded, b1);
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let client_handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(seed);
+            let reader = BufReader::new(client.try_clone().unwrap());
+            let writer = BufWriter::new(client);
+            let mut channel = Channel::new(reader, writer);
+
+            let mut receiver = init_cdm_oprf_receiver(&mut channel, &mut rng, 1, b, bc, OPRFSetting::RevealOutput);
+            receiver.prove_encoded_input(vec![encoded], &mut channel, &mut rng);
+        });
+        let server_handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(seed);
+            let reader = BufReader::new(server.try_clone().unwrap());
+            let writer = BufWriter::new(server);
+            let mut channel = Channel::new(reader, writer);
+
+            let mut sender = init_cdm_oprf_sender(&mut channel, &mut rng, 1, b, bs, OPRFSetting::RevealOutput);
+            sender.check_encoded_input(1, &mut channel, &mut rng);
+        });
+
+        let accepted = server_handle.join().is_ok();
+        let _ = client_handle.join();
+        assert!(!accepted, "server accepted an encoding with an invalid (1, 1) parity cell");
+    }
 }
