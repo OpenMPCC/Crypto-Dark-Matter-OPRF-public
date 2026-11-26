@@ -584,6 +584,8 @@ mod test{
             let expected_output = w_prf_clear(key, encoded_input, b);
             for i in 0..82{
                 assert_eq!(fk_x_server[j*82 + i].0 + fk_x_client[j*82 + i].0, expected_output[i], "Mismatch at index {}, {}", i, j);
+                assert_eq!(fk_x_server[j*82 + i].1.value(), fk_x_server[j*82 + i].0, "Server share value mismatch at index {}, {}", i, j);
+                assert_eq!(fk_x_client[j*82 + i].1.value(), fk_x_client[j*82 + i].0, "Client share value mismatch at index {}, {}", i, j);
                 assert_eq!(fk_x_client[j*82 + i].2.mac(), -fk_x_server[j*82 + i].0*c_delta + fk_x_server[j*82 + i].1.mac(), "Mac mismatch at index {}, {}", i, j);
                 assert_eq!(fk_x_server[j*82 + i].2.mac(), -fk_x_client[j*82 + i].0*cdmoprfsender.f3_v.get_delta() + fk_x_client[j*82 + i].1.mac(), "Mac mismatch at index {}, {}", i, j);
             }

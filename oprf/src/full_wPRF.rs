@@ -44,7 +44,7 @@ where Fp::PrimeField: TryFrom<u8>
                 output_size = n*batch_size - (iterations-1)*(1<<20);
             }
             let da_bits_part: Vec<(crate::dabits::OPRFSharing<F256b>, crate::dabits::OPRFSharing<Fp>)> = dabit_client(
-                1<<20, 
+                output_size, 
                 &mut fcom_p_2,
                 &mut fcom_v_2,
                 &mut fcom_p_3,
@@ -791,7 +791,7 @@ fn convert_server(batch_size: usize, b: [[F3; 256]; 82], b_tables: &mut Vec<F3>,
             let key = F82t::compute_vector(b[i], &key_server_share_f3);
             let share = OPRFSharing{
                 0: outs[i],
-                1: MacProver::new(outs[1], mac),
+                1: MacProver::new(outs[i], mac),
                 2: MacVerifier::new(key)
             };
             out_shares.push(share);
