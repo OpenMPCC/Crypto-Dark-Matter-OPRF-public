@@ -20,11 +20,18 @@ pub fn decompose(input: [F3; N_PRIME]) -> [F2; D + 2*(N_PRIME-D)]{
     decompose
 }
 
-/// Positions of the two bits of parity cell `i` in the output of `decompose`.
+/// Coefficients of alpha holding the two bits of parity cell `i` in an
+/// encoded input (`encode_input` stores bit k of `decompose` at alpha^(255-k)).
 /// A valid cell is (0, 0), (1, 0) or (0, 1); the gadget maps the invalid cell
 /// (1, 1) to 2 + 1 = 0, so the input check must also prove b0 * b1 = 0.
 pub fn parity_cell(i: usize) -> (usize, usize) {
-    (i, N_PRIME + i)
+    (255 - i, 255 - (N_PRIME + i))
+}
+
+/// Coefficient of alpha^p in `y`.
+pub fn coefficient_bit(y: &F256b, p: usize) -> F2 {
+    let word = if p < 128 { y.low >> p } else { y.high >> (p - 128) };
+    F2::try_from((word & 1) as u8).unwrap()
 }
 
 pub fn apply_gadget_convert<Fb: FiniteRing, Fp: FiniteRing>(input: [Fb; D + 2*(N_PRIME-D)], gadget: [[Fp; 2*(N_PRIME)]; N_PRIME])
@@ -257,6 +264,27 @@ mod test{
             assert_eq!(output[i], input[i], "Output at index {} should match input", i);
         }
 
+    }
+
+    #[test]
+    fn test_parity_cell(){
+        let mut rng = AesRng::from_seed(Block::from([0; 16]));
+        let (g, _, _) = generate_linear_code();
+        for _ in 0..25{
+            let input = F128b::random(&mut rng);
+            let encoded = encode_input(input, g);
+            let x: u128 = input.into();
+            for i in 0..(N_PRIME - D){
+                let mut z = F3::ZERO;
+                for j in 0..D{
+                    z += g[D + i][j] * F3{msb: 0, lsb: ((x >> j) & 1) as u8};
+                }
+                let z: u8 = z.into();
+                let (b0, b1) = parity_cell(i);
+                assert_eq!(coefficient_bit(&encoded, b0), F2::try_from((z >> 1) & 1).unwrap(), "First bit of cell {}", i);
+                assert_eq!(coefficient_bit(&encoded, b1), F2::try_from(z & 1).unwrap(), "Second bit of cell {}", i);
+            }
+        }
     }
 
     #[test]

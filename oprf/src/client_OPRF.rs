@@ -1,7 +1,7 @@
 use rand::{CryptoRng, Rng};
-use scuttlebutt::{field::{F128b, F256b, F82t, F3}, ring::FiniteRing, AbstractChannel};
+use scuttlebutt::{field::{F128b, F256b, F82t, F2, F3}, ring::FiniteRing, AbstractChannel};
 
-use crate::{client_wPRF::{c_w_prf_client, c_w_prf_server}, dabits::OPRFSharing, full_wPRF::{w_prf_client_commit_to_input, w_prf_server_commit_to_input}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input, parity_cell, D, N_PRIME}, vole_util::*};
+use crate::{client_wPRF::{c_w_prf_client, c_w_prf_server}, dabits::OPRFSharing, full_wPRF::{w_prf_client_commit_to_input, w_prf_server_commit_to_input}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input, coefficient_bit, parity_cell, D, N_PRIME}, vole_util::*};
 use hd_quicksilver::homcom::{FComProver, FComVerifier, MacProver, MacVerifier};
 
 pub struct CDMOPRFHalfReceiver{
@@ -44,6 +44,7 @@ pub fn c_oprf_client<C: AbstractChannel, RNG: CryptoRng + Rng>(
     ha_bits: (Vec<OPRFSharing<F256b>>, Vec<F3>),
     encoding_da_bits: (Vec<MacProver<F256b>>, Vec<MacProver<F82t>>),
     fcom_p_3: &mut FComProver<F82t>,
+    fcom_p_2: &mut FComProver<F256b>,
     fcom_k: &mut FComProver<F256b>,
     fcom_k_delta: &mut FComProver<F256b>,
 ) -> Vec<F3> {
@@ -99,7 +100,6 @@ pub fn c_oprf_client<C: AbstractChannel, RNG: CryptoRng + Rng>(
     let mut cell_triples = Vec::with_capacity(batch_size * (N_PRIME - D));
     for j in 0..batch_size{
         let mut mac_f3 = Vec::with_capacity(254);
-        let mut val_f3 = Vec::with_capacity(254);
 
         let mut c_bit_string = [F3::ZERO; 256];
         for i in 0..128{
@@ -125,20 +125,18 @@ pub fn c_oprf_client<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
             let mac = dabit3_i.mac() + c_i * dabit3_i.mac();
             mac_f3.push(mac);
-            // c XOR bit = c + (1 + c) * bit over F3
-            val_f3.push(c_i + (F3::ONE + c_i) * dabit3_i.value());
         }
 
         mac_f3.reverse();
-        val_f3.reverse();
 
-        // each parity cell must be valid: b0 * b1 = 0
+        // each parity cell must be valid: b0 * b1 = 0, proved on the F2
+        // MACs of the same bits, where multiplication is much cheaper
         for i in 0..(N_PRIME - D){
             let (b0, b1) = parity_cell(i);
             cell_triples.push((
-                MacProver::new(val_f3[b0], mac_f3[b0]),
-                MacProver::new(val_f3[b1], mac_f3[b1]),
-                MacProver::new(F3::ZERO, F82t::ZERO),
+                fcom_p_2.affine_add_cst(coefficient_bit(&c_to_open[j], b0), dabits_2[b0 + j*n]),
+                fcom_p_2.affine_add_cst(coefficient_bit(&c_to_open[j], b1), dabits_2[b1 + j*n]),
+                MacProver::new(F2::ZERO, F256b::ZERO),
             ));
         }
 
@@ -154,7 +152,7 @@ pub fn c_oprf_client<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
     fcom_p_3.check_zero(channel, &check_macs).unwrap();
     drop(check_macs);
-    fcom_p_3.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
+    fcom_p_2.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
     drop(cell_triples);
     c_w_prf_client(encoded_inputs, batch_size, channel, rng, b_tables, ha_bits, coms, fcom_k_delta)
 
@@ -243,13 +241,14 @@ pub fn c_oprf_server<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
         mac_f3.reverse();
 
-        // each parity cell must be valid: b0 * b1 = 0
+        // each parity cell must be valid: b0 * b1 = 0, proved on the F2
+        // MACs of the same bits, where multiplication is much cheaper
         for i in 0..(N_PRIME - D){
             let (b0, b1) = parity_cell(i);
             cell_triples.push((
-                MacVerifier::new(mac_f3[b0]),
-                MacVerifier::new(mac_f3[b1]),
-                MacVerifier::new(F82t::ZERO),
+                fcom_v_2.affine_add_cst(coefficient_bit(&c_values[j], b0), dabits_2[b0 + j*n]),
+                fcom_v_2.affine_add_cst(coefficient_bit(&c_values[j], b1), dabits_2[b1 + j*n]),
+                MacVerifier::new(F256b::ZERO),
             ));
         }
 
@@ -265,7 +264,7 @@ pub fn c_oprf_server<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
     fcom_v_3.check_zero(channel, rng, &check_macs).unwrap();
     drop(check_macs);
-    fcom_v_3.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
+    fcom_v_2.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
     drop(cell_triples);
 
     c_w_prf_server(key, batch_size, channel, rng, b_tables, ha_bits, fcom_v_2, fcom_k_delta, coms);
@@ -314,8 +313,8 @@ mod test{
             let mut channel = Channel::new(reader, writer);
             let inputs = vec![input];
 
-            let (habits, encoding_dabits, mut fcom_p_3, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, 1);
-            let out = c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_k, &mut fcom_k_delta);
+            let (habits, encoding_dabits, mut fcom_p_3, mut fcom_p_2, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, 1);
+            let out = c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_p_2, &mut fcom_k, &mut fcom_k_delta);
                 out
         });
 
@@ -378,8 +377,8 @@ mod test{
             let writer = BufWriter::new(client);
             let mut channel = Channel::new(reader, writer);
 
-            let (habits, encoding_dabits, mut fcom_p_3, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, batch_size);
-            let out = c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_k, &mut fcom_k_delta);
+            let (habits, encoding_dabits, mut fcom_p_3, mut fcom_p_2, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, batch_size);
+            let out = c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_p_2, &mut fcom_k, &mut fcom_k_delta);
                 out
         });
 

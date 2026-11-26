@@ -1,9 +1,9 @@
 use hd_quicksilver::homcom::{FComProver, FComVerifier, MacProver, MacVerifier};
 use rand::{CryptoRng, Rng};
-use scuttlebutt::{field::{F128b, F256b, F82t, F3}, ring::FiniteRing, AbstractChannel, Block};
+use scuttlebutt::{field::{F128b, F256b, F82t, F2, F3}, ring::FiniteRing, AbstractChannel, Block};
 use ocelot::Error;
 
-use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input, parity_cell, D, N_PRIME}, vole_util::*};
+use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input, coefficient_bit, parity_cell, D, N_PRIME}, vole_util::*};
 use crate::{matrix_util::generate_precompute_tables, preprocessing::{init_cdm_oprf_receiver, init_cdm_oprf_sender}};
 
 /// Trait containing the associated types used by an oblivious PRF.
@@ -263,7 +263,6 @@ impl CDMOPRFReceiver{
         let mut c_bit_string = [F3::ZERO; 256];
         for j in 0..batch_size{
             let mut mac_f3 = Vec::with_capacity(254);
-            let mut val_f3 = Vec::with_capacity(254);
 
             for i in 0..128{
                 let value = (c_to_open[j].low >> i) & 1;
@@ -289,20 +288,18 @@ impl CDMOPRFReceiver{
         
                 let mac = dabit3_i.mac() + c_i * dabit3_i.mac();
                 mac_f3.push(mac);
-                // c XOR bit = c + (1 + c) * bit over F3
-                val_f3.push(c_i + (F3::ONE + c_i) * dabit3_i.value());
             }
-
+        
             mac_f3.reverse();
-            val_f3.reverse();
 
-            // each parity cell must be valid: b0 * b1 = 0
+            // each parity cell must be valid: b0 * b1 = 0, proved on the F2
+            // MACs of the same bits, where multiplication is much cheaper
             for i in 0..(N_PRIME - D){
                 let (b0, b1) = parity_cell(i);
                 cell_triples.push((
-                    MacProver::new(val_f3[b0], mac_f3[b0]),
-                    MacProver::new(val_f3[b1], mac_f3[b1]),
-                    MacProver::new(F3::ZERO, F82t::ZERO),
+                    self.f2_p.affine_add_cst(coefficient_bit(&c_to_open[j], b0), dabits_2[b0 + j*n]),
+                    self.f2_p.affine_add_cst(coefficient_bit(&c_to_open[j], b1), dabits_2[b1 + j*n]),
+                    MacProver::new(F2::ZERO, F256b::ZERO),
                 ));
             }
 
@@ -319,7 +316,7 @@ impl CDMOPRFReceiver{
         }
 
         self.f3_p.check_zero(channel, &check_macs).unwrap();
-        self.f3_p.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
+        self.f2_p.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
         (encoded_inputs, batch_size, coms)
             }
 }
@@ -414,13 +411,14 @@ impl CDMOPRFSender{
 
             mac_f3.reverse();
 
-            // each parity cell must be valid: b0 * b1 = 0
+            // each parity cell must be valid: b0 * b1 = 0, proved on the F2
+            // MACs of the same bits, where multiplication is much cheaper
             for i in 0..(N_PRIME - D){
                 let (b0, b1) = parity_cell(i);
                 cell_triples.push((
-                    MacVerifier::new(mac_f3[b0]),
-                    MacVerifier::new(mac_f3[b1]),
-                    MacVerifier::new(F82t::ZERO),
+                    self.f2_v.affine_add_cst(coefficient_bit(&c_values[j], b0), dabits_2[b0 + j*n]),
+                    self.f2_v.affine_add_cst(coefficient_bit(&c_values[j], b1), dabits_2[b1 + j*n]),
+                    MacVerifier::new(F256b::ZERO),
                 ));
             }
 
@@ -435,7 +433,7 @@ impl CDMOPRFSender{
         }
         
         self.f3_v.check_zero(channel, rng, &check_macs).unwrap();
-        self.f3_v.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
+        self.f2_v.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
         coms
             }
 }
@@ -722,13 +720,8 @@ mod test{
 		}
 	}
 
-    /// Bit `k` of the decomposed encoding, laid out as in `encode_input`.
-    fn decomposed_bit(y: &F256b, k: usize) -> u128 {
-        if k < 128 { (y.high >> (127 - k)) & 1 } else { (y.low >> (255 - k)) & 1 }
-    }
-
-    fn set_decomposed_bit(y: &mut F256b, k: usize) {
-        if k < 128 { y.high |= 1 << (127 - k); } else { y.low |= 1 << (255 - k); }
+    fn set_coefficient_bit(y: &mut F256b, p: usize) {
+        if p < 128 { y.low |= 1 << p; } else { y.high |= 1 << (p - 128); }
     }
 
     #[test]
@@ -744,10 +737,10 @@ mod test{
         let mut encoded = encode_input(F128b::random(&mut b_rng), generate_linear_code().0);
         let (b0, b1) = (0..N_PRIME - D)
             .map(parity_cell)
-            .find(|&(b0, b1)| decomposed_bit(&encoded, b0) == 0 && decomposed_bit(&encoded, b1) == 0)
+            .find(|&(b0, b1)| coefficient_bit(&encoded, b0) == F2::ZERO && coefficient_bit(&encoded, b1) == F2::ZERO)
             .expect("no zero parity cell");
-        set_decomposed_bit(&mut encoded, b0);
-        set_decomposed_bit(&mut encoded, b1);
+        set_coefficient_bit(&mut encoded, b0);
+        set_coefficient_bit(&mut encoded, b1);
 
         let (client, server) = UnixStream::pair().unwrap();
         let client_handle = std::thread::spawn(move || {
