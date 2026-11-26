@@ -158,6 +158,10 @@ pub fn init_cdm_oprf_receiver<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
     weak_equality_first(channel, rng, &mut [mac_delta_0 - k_key].into(), &mut f2_p).unwrap();
 
+    // The F2 cell check and the authenticated VOLE draw 2N more VOLEs online; reserve
+    // them now so that no VOLE extension runs in the online phase.
+    f2_p.voles_reserve(channel, rng, 2*N).unwrap();
+
     CDMOPRFReceiver{f2_p, f3_p, f2_v, f3_v, fk, fk_delta, da_bits, encoding_la_bits, mac_delta_0, b, b_tables}
 }
 
@@ -313,6 +317,10 @@ pub fn init_cdm_oprf_sender<C: AbstractChannel, RNG: CryptoRng + Rng>(
     channel.flush().unwrap();
 
     weak_equality_second(channel, rng, &mut [mac_k-key_delta_0].into(), &mut f2_v).unwrap();
+
+    // The F2 cell check and the authenticated VOLE draw 2N more VOLEs online; reserve
+    // them now so that no VOLE extension runs in the online phase.
+    f2_v.voles_reserve(channel, rng, 2*N).unwrap();
 
     let key = fk.get_delta();
     CDMOPRFSender{f2_p, f3_p, f2_v, f3_v, fk, fk_delta, da_bits, encoding_la_bits, key_delta_0, b, b_tables, key }

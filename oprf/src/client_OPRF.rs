@@ -338,6 +338,36 @@ mod test{
     }
 
     #[test]
+    fn test_no_vole_extensions_online() {
+        // preprocessing must reserve every VOLE that the online phase draws
+        for batch_size in [2, 64] {
+            let seed = Block::from([0; 16]);
+            let (_, bc) = crate::matrix_util::generate_fixed_b();
+            let bs = bc.clone();
+            let mut rng = AesRng::from_seed(seed);
+            let inputs: Vec<F128b> = (0..batch_size).map(|_| F128b::random(&mut rng)).collect();
+            let (client, server) = UnixStream::pair().unwrap();
+            let handle = std::thread::spawn(move || {
+                let mut rng = AesRng::from_seed(seed);
+                let mut channel = Channel::new(BufReader::new(client.try_clone().unwrap()), BufWriter::new(client));
+                let (habits, encoding_dabits, mut fcom_p_3, mut fcom_p_2, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, batch_size);
+                let before = [fcom_p_2.get_stats().num_vole_extensions_performed, fcom_p_3.get_stats().num_vole_extensions_performed];
+                c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_p_2, &mut fcom_k, &mut fcom_k_delta);
+                [fcom_p_2.get_stats().num_vole_extensions_performed - before[0], fcom_p_3.get_stats().num_vole_extensions_performed - before[1]]
+            });
+            let mut rng = AesRng::from_seed(seed);
+            let mut channel = Channel::new(BufReader::new(server.try_clone().unwrap()), BufWriter::new(server));
+            let key = F256b::random(&mut rng);
+            let (habits, encoding_dabits, mut fcom_v_2, mut fcom_v_3, mut fcom_k, mut fcom_k_delta) = c_preprocess_server(&mut channel, &mut rng, batch_size, key);
+            let before = [fcom_v_2.get_stats().num_vole_extensions_performed, fcom_v_3.get_stats().num_vole_extensions_performed];
+            c_oprf_server(key, batch_size, &mut channel, &mut rng, bs, habits, encoding_dabits, &mut fcom_v_2, &mut fcom_v_3, &mut fcom_k, &mut fcom_k_delta);
+            let server = [fcom_v_2.get_stats().num_vole_extensions_performed - before[0], fcom_v_3.get_stats().num_vole_extensions_performed - before[1]];
+            let client = handle.join().unwrap();
+            assert_eq!((client, server), ([0, 0], [0, 0]), "batch {}", batch_size);
+        }
+    }
+
+    #[test]
     fn test_oprf_batch() {
         let seed = Block::from([0; 16]);
 
