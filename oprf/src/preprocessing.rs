@@ -69,7 +69,7 @@ pub fn init_cdm_oprf_receiver<C: AbstractChannel, RNG: CryptoRng + Rng>(
                 output_size = N*batch_size - (iterations-1)*(1<<20);
             }
             let da_bits_part = dabit_client(
-                1<<20, 
+                output_size, 
                 &mut f2_p,
                 &mut f2_v,
                 &mut f3_p,
@@ -225,7 +225,7 @@ pub fn init_cdm_oprf_sender<C: AbstractChannel, RNG: CryptoRng + Rng>(
                 output_size = N*batch_size - (iterations-1)*(1<<20);
             }
             let da_bits_part = dabit_server(
-                1<<20, 
+                output_size, 
                 &mut f2_p,
                 &mut f2_v,
                 &mut f3_p,
