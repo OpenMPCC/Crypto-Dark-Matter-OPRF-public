@@ -23,10 +23,10 @@ fn main(){
             }
             let t_start = Instant::now();
 
-            let (habits, encoding_dabits, mut fcom_p_3, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, batch_size);
+            let (habits, encoding_dabits, mut fcom_p_3, mut fcom_p_2, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, batch_size);
             let time_pre = t_start.elapsed();
             let t_start = Instant::now();
-            let fk_x = c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_k, &mut fcom_k_delta);
+            let fk_x = c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_p_2, &mut fcom_k, &mut fcom_k_delta);
             
             let time = t_start.elapsed();
             print!("{}, {}, {},",time_pre.as_micros()/batch_size as u128, time.as_micros()/batch_size as u128, 1000.0*channel.kilobits_written()/batch_size as f64);

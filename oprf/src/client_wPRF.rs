@@ -14,7 +14,7 @@ pub fn c_preprocess_client<Fb: FiniteField, Fp: FiniteField, C: AbstractChannel,
     batch_size: usize,
 ) -> ((Vec<OPRFSharing<Fb>>, Vec<Fp::PrimeField>), 
 (Vec<MacProver<Fb>>, Vec<MacProver<Fp>>),
-      FComProver<Fp>, FComProver<Fb>, FComProver<Fb>)
+      FComProver<Fp>, FComProver<Fb>, FComProver<Fb>, FComProver<Fb>)
 where u8: From<<Fb as FiniteField>::PrimeField>,
 Fp::PrimeField: TryFrom<u8>
 {
@@ -63,7 +63,7 @@ Fp::PrimeField: TryFrom<u8>
     }
 
 
-    return (ha_bits, encoding_dabits, fcom_p_3, fcom_k, fcom_k_delta);
+    return (ha_bits, encoding_dabits, fcom_p_3, fcom_p_2, fcom_k, fcom_k_delta);
 }
 
 pub fn c_preprocess_server<Fb: FiniteField, Fp: FiniteField, C: AbstractChannel, RNG: CryptoRng + Rng>(
@@ -361,7 +361,7 @@ mod tests{
             let writer = BufWriter::new(client);
             let mut channel = Channel::new(reader, writer);
 
-            let (habits, _, _, mut fcom_k, mut fcom_k_delta) = c_preprocess_client::<F256b, F82t, _, _>(&mut channel, &mut rng, len);
+            let (habits, _, _, _, mut fcom_k, mut fcom_k_delta) = c_preprocess_client::<F256b, F82t, _, _>(&mut channel, &mut rng, len);
             let input_coms = w_prf_client_commit_to_input(&inputs, len, &mut channel, &mut rng, &mut fcom_k);
             c_w_prf_client(inputs, len, &mut channel, &mut rng, b, habits, input_coms, &mut fcom_k_delta)
         });
@@ -413,7 +413,7 @@ mod tests{
             let writer = BufWriter::new(client);
             let mut channel = Channel::new(reader, writer);
 
-            let (habits, _, _, mut fcom_k, mut fcom_k_delta) = c_preprocess_client::<F256b, F82t, _, _>(&mut channel, &mut rng, len);
+            let (habits, _, _, _, mut fcom_k, mut fcom_k_delta) = c_preprocess_client::<F256b, F82t, _, _>(&mut channel, &mut rng, len);
             let input_coms = w_prf_client_commit_to_input(&inputs, len, &mut channel, &mut rng, &mut fcom_k);
             c_w_prf_client(inputs, len, &mut channel, &mut rng, bc, habits, input_coms, &mut fcom_k_delta)
         });

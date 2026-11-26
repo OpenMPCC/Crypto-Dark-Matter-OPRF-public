@@ -1,9 +1,9 @@
 use hd_quicksilver::homcom::{FComProver, FComVerifier, MacProver, MacVerifier};
 use rand::{CryptoRng, Rng};
-use scuttlebutt::{field::{F128b, F256b, F82t, F3}, ring::FiniteRing, AbstractChannel, Block};
+use scuttlebutt::{field::{F128b, F256b, F82t, F2, F3}, ring::FiniteRing, AbstractChannel, Block};
 use ocelot::Error;
 
-use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input}, vole_util::*};
+use crate::{dabits::{OPRFExtensionSharing, OPRFSharing}, full_wPRF::{secret_shared_w_prf_client_with_commitment, secret_shared_w_prf_server_with_commitment, w_prf_client_commit_to_input, w_prf_client_with_commitment, w_prf_server_commit_to_input, w_prf_server_with_commitment}, input_encoding::{apply_gadget, apply_parity_check_matrix_f82t, generate_linear_code, encode_input, coefficient_bit, parity_cell, D, N_PRIME}, vole_util::*};
 use crate::{matrix_util::generate_precompute_tables, preprocessing::{init_cdm_oprf_receiver, init_cdm_oprf_sender}};
 
 /// Trait containing the associated types used by an oblivious PRF.
@@ -208,12 +208,17 @@ impl CDMOPRFReceiver{
     }
 
     fn check_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, input: Vec<F128b>, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, usize, Vec<F256b>) {
-        let(g, gadget, h) = generate_linear_code();
+        let (g, _, _) = generate_linear_code();
         let mut encoded_inputs = Vec::with_capacity(input.len());
         for i in input{
             let encoded = encode_input(i, g);
             encoded_inputs.push(encoded);
         }
+        self.prove_encoded_input(encoded_inputs, channel, rng)
+    }
+
+    fn prove_encoded_input<C: AbstractChannel, RNG: CryptoRng + Rng>(&mut self, encoded_inputs: Vec<F256b>, channel: &mut C, rng: &mut RNG) -> (Vec<F256b>, usize, Vec<F256b>) {
+        let (_, gadget, h) = generate_linear_code();
         let batch_size = encoded_inputs.len();
             
         let n = 256;
@@ -254,10 +259,11 @@ impl CDMOPRFReceiver{
         
         // Convert mac to F3 and apply gadget & H
         let mut check_macs = Vec::with_capacity(batch_size);
+        let mut cell_triples = Vec::with_capacity(batch_size * (N_PRIME - D));
         let mut c_bit_string = [F3::ZERO; 256];
         for j in 0..batch_size{
             let mut mac_f3 = Vec::with_capacity(254);
-        
+
             for i in 0..128{
                 let value = (c_to_open[j].low >> i) & 1;
                 c_bit_string[i] = F3{msb: 0, lsb: value as u8};
@@ -266,7 +272,7 @@ impl CDMOPRFReceiver{
             }
         
             // Convert to F3
-            for i in 0..2{
+            for i in 254..256{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
                 let mac = dabit3_i.mac() + c_i * dabit3_i.mac();
@@ -275,7 +281,7 @@ impl CDMOPRFReceiver{
                 check_macs.push(mac);
             }
         
-            for i in 2..256{
+            for i in 0..254{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
         
@@ -284,21 +290,32 @@ impl CDMOPRFReceiver{
                 mac_f3.push(mac);
             }
         
-            mac_f3.reverse();
-        
+
+            // each parity cell must be valid: b0 * b1 = 0, proved on the F2
+            // MACs of the same bits, where multiplication is much cheaper
+            for i in 0..(N_PRIME - D){
+                let (b0, b1) = parity_cell(i);
+                cell_triples.push((
+                    self.f2_p.affine_add_cst(coefficient_bit(&c_to_open[j], b0), dabits_2[b0 + j*n]),
+                    self.f2_p.affine_add_cst(coefficient_bit(&c_to_open[j], b1), dabits_2[b1 + j*n]),
+                    MacProver::new(F2::ZERO, F256b::ZERO),
+                ));
+            }
+
             // apply gadget
             let gadget_out = apply_gadget(mac_f3.try_into().unwrap(), gadget);
-        
+
             // apply H
             let check_matrix: [F82t; 63] = apply_parity_check_matrix_f82t(gadget_out, h);
             for i in 0..63{
                 check_macs.push(MacProver::new(F3::ZERO,check_matrix[i]));
             }
-        
-        
+
+
         }
-        
+
         self.f3_p.check_zero(channel, &check_macs).unwrap();
+        self.f2_p.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
         (encoded_inputs, batch_size, coms)
             }
 }
@@ -361,10 +378,11 @@ impl CDMOPRFSender{
         
         // Convert mac to F3 and apply gadget & H
         let mut check_macs = Vec::with_capacity(batch_size);
+        let mut cell_triples = Vec::with_capacity(batch_size * (N_PRIME - D));
         let mut c_bit_string = [F3::ZERO; 256];
         for j in 0..batch_size{
             let mut mac_f3 = Vec::with_capacity(254);
-            
+
             for i in 0..128{
                 let value = (c_values[j].low >> i) & 1;
                 c_bit_string[i] = F3{msb: 0, lsb: value as u8};
@@ -372,7 +390,7 @@ impl CDMOPRFSender{
                 c_bit_string[i+128] = F3{msb: 0, lsb: value as u8};
             }
             // Convert to F3
-            for i in 0..2{
+            for i in 254..256{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
         
@@ -382,16 +400,26 @@ impl CDMOPRFSender{
                 check_macs.push(mac);
             }
         
-            for i in 2..256{
+            for i in 0..254{
                 let dabit3_i = dabits_3[i+j*n];
                 let c_i = c_bit_string[i];
         
                 let mac = -(c_i*self.f3_v.get_delta()) + dabit3_i.mac() + c_i * dabit3_i.mac();
                 mac_f3.push(mac);
             }
-        
-            mac_f3.reverse();
-        
+
+
+            // each parity cell must be valid: b0 * b1 = 0, proved on the F2
+            // MACs of the same bits, where multiplication is much cheaper
+            for i in 0..(N_PRIME - D){
+                let (b0, b1) = parity_cell(i);
+                cell_triples.push((
+                    self.f2_v.affine_add_cst(coefficient_bit(&c_values[j], b0), dabits_2[b0 + j*n]),
+                    self.f2_v.affine_add_cst(coefficient_bit(&c_values[j], b1), dabits_2[b1 + j*n]),
+                    MacVerifier::new(F256b::ZERO),
+                ));
+            }
+
             // apply gadget
             let gadget_out = apply_gadget(mac_f3.try_into().unwrap(), gadget);
         
@@ -403,6 +431,7 @@ impl CDMOPRFSender{
         }
         
         self.f3_v.check_zero(channel, rng, &check_macs).unwrap();
+        self.f2_v.quicksilver_check_multiply(channel, rng, &cell_triples).unwrap();
         coms
             }
 }
@@ -690,4 +719,51 @@ mod test{
 			);
 		}
 	}
+
+    fn set_coefficient_bit(y: &mut F256b, p: usize) {
+        if p < 128 { y.low |= 1 << p; } else { y.high |= 1 << (p - 128); }
+    }
+
+    #[test]
+    fn test_reject_invalid_parity_cell() {
+        // The gadget maps a parity cell (b0, b1) to 2*b0 + b1, so the invalid
+        // cell (1, 1) decodes to 0 and passes the parity check wherever the
+        // parity is 0. A malicious client sends such a word.
+        let seed = Block::from([0; 16]);
+        let (b, bc) = crate::matrix_util::generate_fixed_b();
+        let bs = bc.clone();
+
+        let mut b_rng = AesRng::from_seed(seed);
+        let mut encoded = encode_input(F128b::random(&mut b_rng), generate_linear_code().0);
+        let (b0, b1) = (0..N_PRIME - D)
+            .map(parity_cell)
+            .find(|&(b0, b1)| coefficient_bit(&encoded, b0) == F2::ZERO && coefficient_bit(&encoded, b1) == F2::ZERO)
+            .expect("no zero parity cell");
+        set_coefficient_bit(&mut encoded, b0);
+        set_coefficient_bit(&mut encoded, b1);
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let client_handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(seed);
+            let reader = BufReader::new(client.try_clone().unwrap());
+            let writer = BufWriter::new(client);
+            let mut channel = Channel::new(reader, writer);
+
+            let mut receiver = init_cdm_oprf_receiver(&mut channel, &mut rng, 1, b, bc, OPRFSetting::RevealOutput);
+            receiver.prove_encoded_input(vec![encoded], &mut channel, &mut rng);
+        });
+        let server_handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(seed);
+            let reader = BufReader::new(server.try_clone().unwrap());
+            let writer = BufWriter::new(server);
+            let mut channel = Channel::new(reader, writer);
+
+            let mut sender = init_cdm_oprf_sender(&mut channel, &mut rng, 1, b, bs, OPRFSetting::RevealOutput);
+            sender.check_encoded_input(1, &mut channel, &mut rng);
+        });
+
+        let accepted = server_handle.join().is_ok();
+        let _ = client_handle.join();
+        assert!(!accepted, "server accepted an encoding with an invalid (1, 1) parity cell");
+    }
 }
