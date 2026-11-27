@@ -69,6 +69,12 @@ pub enum CodeType {
     Large,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cheating client: commits `cheat(bit)` mod 3 for candidate `index`.
+    static CHEAT: std::cell::Cell<Option<(usize, fn(u8) -> u8)>> = std::cell::Cell::new(None);
+}
+
 pub fn code_candidate_client<Fb: FiniteField, Fp: FiniteField, C: AbstractChannel, RNG: CryptoRng + Rng>(
     output_size: usize,
     fcom2: &mut FComProver<Fb>,
@@ -119,6 +125,13 @@ Fp::PrimeField: TryFrom<u8>
             Err(_) => panic!("Failed to convert u8 to Fp::PrimeField"),
         }
     }
+    #[cfg(test)]
+    if let Some((index, cheat)) = CHEAT.with(|c| c.get()) {
+        com2_values[index] = match Fp::PrimeField::try_from(cheat(u8::from(v2[index].value()))) {
+            Ok(val) => val,
+            Err(_) => panic!("Failed to convert u8 to Fp::PrimeField"),
+        };
+    }
     /*
     v2
         .iter()
@@ -135,7 +148,7 @@ Fp::PrimeField: TryFrom<u8>
     channel.flush().unwrap();
 
     // Step 0: Check that commitment mod 3 are bits
-    let chi: Fp = Fp::random(rng);
+    let chi: Fp = channel.read_serializable().unwrap();
     let mut qs_prover = QSStateProver::<Fp, 2>::init_with_chi(chi);
 
     for i in 0..v3.len(){
@@ -144,6 +157,8 @@ Fp::PrimeField: TryFrom<u8>
         let mut one: HDMacProver<Fp, 2_> = HDMacProver::new_constant(Fp::ONE);
         one.sub_assign(&prod_right);
         prod_left.mul_assign(&one);
+        #[cfg(test)]
+        let prod_left = crate::vole_util::claim_zero(prod_left);
         qs_prover.check_zero(&prod_left);
     }
     qs_prover.finalize(channel, rng, fcom3).unwrap();
@@ -206,7 +221,7 @@ Fp::PrimeField: TryFrom<u8>
     drop(bucket_index);
 
     // Step 4: Check buckets for consistency
-    let chi: Fp = Fp::random(rng);
+    let chi: Fp = channel.read_serializable().unwrap();
     let mut qs_prover = QSStateProver::<Fp, 3>::init_with_chi(chi);
     let mut c_to_open = Vec::with_capacity(ell * (b-k));
     for bucket in 0..ell {
@@ -259,6 +274,8 @@ Fp::PrimeField: TryFrom<u8>
             to_check.push(xor_left);
         }
         for xor in to_check.iter() {
+            #[cfg(test)]
+            let xor = &crate::vole_util::claim_zero(xor.clone());
             qs_prover.check_zero(xor);
         }
     }
@@ -320,8 +337,11 @@ Fp::PrimeField: TryFrom<u8>{
     channel.flush().unwrap();
 
     // Step 0: check commitment mod 3 to be bits
+    // the verifier picks the challenge after the candidates are committed
     let delta =  fcom3.get_delta();
     let chi: Fp = Fp::random(rng);
+    channel.write_serializable(&chi).unwrap();
+    channel.flush().unwrap();
     let mut qs_verifier = QSStateVerifier::<Fp>::init_with_delta_and_chi(delta, chi);
     for i in 0..v3.len(){
         let mut prod_left: HDMacVerifier<Fp> = v3[i].into();
@@ -331,7 +351,7 @@ Fp::PrimeField: TryFrom<u8>{
         prod_left.mul_assign(&one);
         qs_verifier.check_zero(&prod_left);
     }
-    qs_verifier.finalize_and_verify::<C, RNG, 2>(channel, rng, fcom3).unwrap();
+    assert!(qs_verifier.finalize_and_verify::<C, RNG, 2>(channel, rng, fcom3).unwrap(), "daBit candidates are not bits mod 3");
 
     // Step 1: Select subset S of size C given by the verifier
     let seed = rng.gen::<Block>();
@@ -397,6 +417,8 @@ Fp::PrimeField: TryFrom<u8>{
     // Step 4: Check buckets for consistency
     let delta =  fcom3.get_delta();
     let chi: Fp = Fp::random(rng);
+    channel.write_serializable(&chi).unwrap();
+    channel.flush().unwrap();
     let mut qs_verifier = QSStateVerifier::<Fp>::init_with_delta_and_chi(delta, chi);
     let mut c_to_open = Vec::with_capacity(ell * (b-k));
     for bucket in 0..ell {
@@ -441,8 +463,9 @@ Fp::PrimeField: TryFrom<u8>{
                 xor_left.sub_assign(delta, &xor_right);
                 //xor_left.sub_assign_constant(delta, value.into());
             }else{
+                // the parity bit is 1, so the two halves must sum to 1 mod 3
                 xor_left.add_assign(delta, &xor_right);
-                xor_left.add_assign_constant(delta, value.into());
+                xor_left.sub_assign_constant(delta, value.into());
             }
             to_check.push(xor_left);
         }
@@ -450,7 +473,7 @@ Fp::PrimeField: TryFrom<u8>{
             qs_verifier.check_zero(xor);
         }
     }
-    qs_verifier.finalize_and_verify::<C, RNG, 6>(channel, rng, fcom3).unwrap();
+    assert!(qs_verifier.finalize_and_verify::<C, RNG, 6>(channel, rng, fcom3).unwrap(), "daBit bucket check failed");
 
     // Step 5: Outpur first k candidates from buckets
     let mut v2_out = Vec::with_capacity(ell*k as usize);
@@ -541,5 +564,54 @@ mod test{
             assert_eq!(v2[i].value() * fcom2.get_delta() + v2[i].mac(), vecs.0[i].mac());
             assert_eq!(-v3[i].value() * fcom3.get_delta() + v3[i].mac(), vecs.1[i].mac());
         }
+    }
+
+    /// Runs the consistency check against a client that cheats on one
+    /// candidate, and returns the server's rejection message, if any.
+    fn server_rejection(index: usize, cheat: fn(u8) -> u8) -> Option<String> {
+        let (client, server) = UnixStream::pair().unwrap();
+        let param = 98;
+        let code = CodeType::Large;
+        let (lpn_setup_params, lpn_extend_params) = choose_lpn_parameters::<F3>(2 * param);
+        let (setup_client, extend_client) = (lpn_setup_params.clone(), lpn_extend_params.clone());
+        let client_handle = std::thread::spawn(move || {
+            CHEAT.with(|c| c.set(Some((index, cheat))));
+            let mut rng = AesRng::from_seed(Default::default());
+            let mut channel = Channel::new(BufReader::new(client.try_clone().unwrap()), BufWriter::new(client));
+            let mut fcom2 = FComProver::<F64b>::init(&mut channel, &mut rng, setup_client.clone(), extend_client.clone()).unwrap();
+            let mut fcom3 = FComProver::<F64t>::init(&mut channel, &mut rng, setup_client, extend_client).unwrap();
+            code_candidate_client(param, &mut fcom2, &mut fcom3, &mut channel, &mut rng, &code);
+        });
+        let server_handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(Default::default());
+            let mut channel = Channel::new(BufReader::new(server.try_clone().unwrap()), BufWriter::new(server));
+            let mut fcom2 = FComVerifier::<F64b>::init(&mut channel, &mut rng, lpn_setup_params.clone(), lpn_extend_params.clone()).unwrap();
+            let mut fcom3 = FComVerifier::<F64t>::init(&mut channel, &mut rng, lpn_setup_params, lpn_extend_params).unwrap();
+            code_candidate_server(param, &mut fcom2, &mut fcom3, &mut channel, &mut rng, &CodeType::Large);
+        });
+        let server = server_handle.join();
+        // after a rejection the client fails too, as the server stops talking
+        let _ = client_handle.join();
+        server.err().map(crate::vole_util::panic_message)
+    }
+
+    #[test]
+    fn test_reject_non_bit_candidate() {
+        let err = server_rejection(0, |_| 2).expect("server accepted a candidate equal to 2 mod 3");
+        assert!(err.contains("daBit candidates are not bits mod 3"), "unexpected rejection: {}", err);
+    }
+
+    #[test]
+    fn test_reject_inconsistent_candidate() {
+        // the cut-and-choose step catches the opened candidates, the bucket check the others
+        let mut by_bucket_check = 0;
+        for index in 0..8 {
+            let err = server_rejection(index, |bit| 1 - bit).expect("server accepted an inconsistent candidate");
+            assert!(err.contains("check_zero failed") || err.contains("daBit bucket check failed"), "unexpected rejection: {}", err);
+            if err.contains("daBit bucket check failed") {
+                by_bucket_check += 1;
+            }
+        }
+        assert!(by_bucket_check > 0, "no inconsistent candidate reached the bucket check");
     }
 }
