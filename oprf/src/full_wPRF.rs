@@ -542,6 +542,12 @@ fn open_c_client<C: AbstractChannel>
     c
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only cheating client: authenticates k * (x + 1) instead of k * x.
+    static CHEAT_VOLE: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
 fn authenticated_vole_client<C: AbstractChannel, RNG: CryptoRng + Rng>
 (inputs: Vec<F256b>, batch_size: usize, channel: &mut C, rng: &mut RNG, fcom_p_2: &mut FComProver<F256b>, fcom_v_2: &mut FComVerifier<F256b>, fcom_k: &mut FComProver<F256b>, fcom_k_delta: &mut FComProver<F256b>, input_com: Vec<F256b>, mac_delta: F256b, n: usize) -> (Vec<F256b>, Vec<F256b>, Vec<F256b>) {
     // Online phase
@@ -550,8 +556,7 @@ fn authenticated_vole_client<C: AbstractChannel, RNG: CryptoRng + Rng>
     let mut key_server_share = Vec::with_capacity(batch_size);
     
     // Checks
-    let chi = F256b::random(rng);
-    let mut qs_prover = QSStateProver::<F256b, 2>::init_with_chi(chi);
+    let mut to_check = Vec::with_capacity(batch_size);
     let s: F256b = F256b::random(rng);
 
     for j in 0..batch_size{        
@@ -564,6 +569,8 @@ fn authenticated_vole_client<C: AbstractChannel, RNG: CryptoRng + Rng>
         // Authenticate server share
         let (value_s_share, m_0) = lift_prover_vole(fcom_k, channel, rng, n);
         let product = x * fcom_v_2.get_delta();
+        #[cfg(test)]
+        let product = if CHEAT_VOLE.with(|c| c.get()) { (x + F256b::ONE) * fcom_v_2.get_delta() } else { product };
         let diff = value_s_share - product;
         channel.write_serializable(&diff).unwrap();
 
@@ -576,7 +583,16 @@ fn authenticated_vole_client<C: AbstractChannel, RNG: CryptoRng + Rng>
         let delta_y: HDMacProver<F256b, 2> = HDMacProver{poly: GeneralPolynomial{constant: -m_0, coefficients: smallvec![product.into()]}, qs_degree: 1};
         delta.mul_assign(&y);
         delta.sub_assign(&delta_y);
-        qs_prover.check_zero(&delta);
+        to_check.push(delta);
+    }
+    // the server picks the challenge after all shares are authenticated
+    channel.flush().unwrap();
+    let chi: F256b = channel.read_serializable().unwrap();
+    let mut qs_prover = QSStateProver::<F256b, 2>::init_with_chi(chi);
+    for delta in to_check.iter() {
+        #[cfg(test)]
+        let delta = &crate::vole_util::claim_zero(delta.clone());
+        qs_prover.check_zero(delta);
     }
     qs_prover.finalize(channel, rng, fcom_k).unwrap();
 
@@ -845,9 +861,7 @@ fn authenticate_vole_server<C: AbstractChannel, RNG: CryptoRng + Rng>(batch_size
     let mut mac_server_share = Vec::with_capacity(batch_size);
     let mut key_client_share = Vec::with_capacity(batch_size);
 
-    let delta =  fcom_k.get_delta();
-    let chi = F256b::random(rng);
-    let mut qs_verifier = QSStateVerifier::<F256b>::init_with_delta_and_chi(delta, chi);
+    let mut to_check = Vec::with_capacity(batch_size);
 
     for j in 0..batch_size{
         // authenticate client share
@@ -868,9 +882,16 @@ fn authenticate_vole_server<C: AbstractChannel, RNG: CryptoRng + Rng>(batch_size
         let delta_y: HDMacVerifier<F256b> = HDMacVerifier{mac: -m_1, qs_degree: 1};
         delta.mul_assign(&y);
         delta.sub_assign(fcom_k.get_delta(), &delta_y);
-        qs_verifier.check_zero(&delta);
+        to_check.push(delta);
     }
-    qs_verifier.finalize_and_verify::<C, RNG, 2>(channel, rng, fcom_k).unwrap();
+    let chi = F256b::random(rng);
+    channel.write_serializable(&chi).unwrap();
+    channel.flush().unwrap();
+    let mut qs_verifier = QSStateVerifier::<F256b>::init_with_delta_and_chi(fcom_k.get_delta(), chi);
+    for delta in to_check.iter() {
+        qs_verifier.check_zero(delta);
+    }
+    assert!(qs_verifier.finalize_and_verify::<C, RNG, 2>(channel, rng, fcom_k).unwrap(), "authenticated VOLE check failed");
     {
         let mut f = lift_verifier_vole(fcom_k, channel, rng, n);
         let d: F256b = channel.read_serializable().unwrap();
@@ -982,6 +1003,42 @@ mod test{
             assert_eq!(fk_x[i], clear[i], "Output of wPRF does not match clear output at index {i}");
         }
 
+    }
+
+    #[test]
+    fn test_reject_wrong_authenticated_vole(){
+        let seed = Block::from([0; 16]);
+        let mut b_rng = AesRng::from_seed(seed);
+        let mut b: [[F3; 256];82] = [[F3::ZERO; 256]; 82];
+        for i in 0..82 {
+            for j in 0..256 {
+                b[i][j] = F3::random(&mut b_rng);
+            }
+        }
+        let mut bc = generate_precompute_tables(b);
+        let mut bs = bc.clone();
+        let input = F256b::from(F64b::random(&mut b_rng));
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let client_handle = std::thread::spawn(move || {
+            CHEAT_VOLE.with(|c| c.set(true));
+            let mut rng = AesRng::from_seed(seed);
+            let mut channel = Channel::new(BufReader::new(client.try_clone().unwrap()), BufWriter::new(client));
+            let (mut da_bits, _, mut fcom_p_2, mut fcom_v_2, mut fcom_v_3, _, mut fcom_k, mut fcom_k_delta, mac_delta) = preprocess_client(&mut channel, &mut rng, 1);
+            w_prf_client(vec![input], 1, &mut channel, &mut rng, &mut b, &mut bc, &mut da_bits, &mut fcom_p_2, &mut fcom_v_2, &mut fcom_v_3, &mut fcom_k, &mut fcom_k_delta, mac_delta);
+        });
+        let server_handle = std::thread::spawn(move || {
+            let mut rng = AesRng::from_seed(seed);
+            let mut channel = Channel::new(BufReader::new(server.try_clone().unwrap()), BufWriter::new(server));
+            let (mut da_bits, _, mut fcom_p_2, mut fcom_v_2, mut fcom_p_3, _, mut fcom_k, mut fcom_k_delta, key_delta) = preprocess_server(&mut channel, &mut rng, 1);
+            let key = fcom_k.get_delta();
+            w_prf_server(key, 1, &mut channel, &mut rng, b, &mut bs, &mut da_bits, &mut fcom_p_2, &mut fcom_v_2, &mut fcom_p_3, &mut fcom_k, &mut fcom_k_delta, key_delta);
+        });
+        let server = server_handle.join();
+        // after a rejection the client fails too, as the server stops talking
+        let _ = client_handle.join();
+        let err = crate::vole_util::panic_message(server.expect_err("server accepted a wrong authenticated VOLE"));
+        assert!(err.contains("authenticated VOLE check failed"), "unexpected rejection: {}", err);
     }
 
     #[test]

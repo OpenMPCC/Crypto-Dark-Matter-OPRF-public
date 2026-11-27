@@ -417,3 +417,21 @@ mod test{
         assert_eq!(a, 1);
     }
 }
+/// In tests, a cheating prover claims that every checked value is zero, so
+/// that only the verifier can catch a false statement.
+#[cfg(test)]
+pub(crate) fn claim_zero<F: FiniteField, const D: usize>(mut mp: hd_quicksilver::hd_quicksilver::HDMacProver<F, D>) -> hd_quicksilver::hd_quicksilver::HDMacProver<F, D> {
+    if mp.value() != F::ZERO {
+        let degree = mp.qs_degree;
+        mp.poly[degree] = F::ZERO;
+    }
+    mp
+}
+
+/// Message of a thread that panicked, for tests that expect a rejection.
+#[cfg(test)]
+pub(crate) fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
+    e.downcast_ref::<String>().cloned()
+        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
