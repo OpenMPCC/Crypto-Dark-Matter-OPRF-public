@@ -58,7 +58,7 @@ pub fn init_cdm_oprf_receiver<C: AbstractChannel, RNG: CryptoRng + Rng>(
     let mut fk = FComProver::<F256b>::init_from_previous_setup_receiver(channel, rng, fcom_k_params, fcom_k_params_extend, a).unwrap();
 
     let (lpn_share_setup_params, lpn_share_extend_params) = choose_lpn_parameters::<F256b>(batch_size*N);
-    let fk_delta = FComProver::<F256b>::init_from_previous_setup_receiver(channel, rng, lpn_share_setup_params, lpn_share_extend_params, a).unwrap();
+    let mut fk_delta = FComProver::<F256b>::init_from_previous_setup_receiver(channel, rng, lpn_share_setup_params, lpn_share_extend_params, a).unwrap();
 
     let mut da_bits = Vec::new();
     if N*batch_size > 1<<21{
@@ -158,9 +158,13 @@ pub fn init_cdm_oprf_receiver<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
     weak_equality_first(channel, rng, &mut [mac_delta_0 - k_key].into(), &mut f2_p).unwrap();
 
-    // The F2 cell check and the authenticated VOLE draw 2N more VOLEs online; reserve
-    // them now so that no VOLE extension runs in the online phase.
+    // Reserve every VOLE that the online phase draws, so that no VOLE extension
+    // runs online: the F2 cell check and the authenticated VOLE draw 2N from f2_p,
+    // committing to the inputs and the authenticated VOLE 2N per input plus 2N
+    // from fk, and the authenticated VOLE N per input plus N from fk_delta.
     f2_p.voles_reserve(channel, rng, 2*N).unwrap();
+    fk.voles_reserve(channel, rng, 2*N*batch_size + 2*N).unwrap();
+    fk_delta.voles_reserve(channel, rng, N*batch_size + N).unwrap();
 
     CDMOPRFReceiver{f2_p, f3_p, f2_v, f3_v, fk, fk_delta, da_bits, encoding_la_bits, mac_delta_0, b, b_tables}
 }
@@ -217,7 +221,7 @@ pub fn init_cdm_oprf_sender<C: AbstractChannel, RNG: CryptoRng + Rng>(
     let mut fk: FComVerifier<F256b> = FComVerifier::<F256b>::init_from_previous_setup_sender(channel, rng, fcom_k_params, fcom_k_params_extend, a).unwrap();
 
     let (lpn_share_setup_params, lpn_share_extend_params) = choose_lpn_parameters::<F256b>(batch_size*N);
-    let fk_delta = FComVerifier::<F256b>::init_with_picked_delta_and_ot(channel, rng, lpn_share_setup_params, lpn_share_extend_params, fk.get_delta()* f2_v.get_delta(), a).unwrap();
+    let mut fk_delta = FComVerifier::<F256b>::init_with_picked_delta_and_ot(channel, rng, lpn_share_setup_params, lpn_share_extend_params, fk.get_delta()* f2_v.get_delta(), a).unwrap();
 
 
     let mut da_bits = Vec::new();
@@ -318,9 +322,10 @@ pub fn init_cdm_oprf_sender<C: AbstractChannel, RNG: CryptoRng + Rng>(
 
     weak_equality_second(channel, rng, &mut [mac_k-key_delta_0].into(), &mut f2_v).unwrap();
 
-    // The F2 cell check and the authenticated VOLE draw 2N more VOLEs online; reserve
-    // them now so that no VOLE extension runs in the online phase.
+    // Reserve every VOLE that the online phase draws; see init_cdm_oprf_receiver.
     f2_v.voles_reserve(channel, rng, 2*N).unwrap();
+    fk.voles_reserve(channel, rng, 2*N*batch_size + 2*N).unwrap();
+    fk_delta.voles_reserve(channel, rng, N*batch_size + N).unwrap();
 
     let key = fk.get_delta();
     CDMOPRFSender{f2_p, f3_p, f2_v, f3_v, fk, fk_delta, da_bits, encoding_la_bits, key_delta_0, b, b_tables, key }

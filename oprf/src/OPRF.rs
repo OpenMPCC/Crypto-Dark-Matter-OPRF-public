@@ -504,9 +504,10 @@ mod test{
 
     }
 
-    /// VOLE extensions that the F2 and F3 commitments of both parties perform
-    /// during the online phase.
-    fn online_vole_extensions(batch_size: usize) -> [usize; 8] {
+    /// VOLE extensions that each VOLE pool of both parties performs during the
+    /// online phase: f2_p, f3_p, f2_v, f3_v, fk and fk_delta of the client, then
+    /// those of the server.
+    fn online_vole_extensions(batch_size: usize) -> [usize; 12] {
         let seed = Block::from([0; 16]);
         let (b, bc) = crate::matrix_util::generate_fixed_b();
         let bs = bc.clone();
@@ -517,30 +518,31 @@ mod test{
             let mut rng = AesRng::from_seed(seed);
             let mut channel = Channel::new(BufReader::new(client.try_clone().unwrap()), BufWriter::new(client));
             let mut r = init_cdm_oprf_receiver(&mut channel, &mut rng, batch_size, b, bc, OPRFSetting::RevealOutput);
-            let ext = |r: &CDMOPRFReceiver| [r.f2_p.get_stats().num_vole_extensions_performed, r.f3_p.get_stats().num_vole_extensions_performed,
-                r.f2_v.get_stats().num_vole_extensions_performed, r.f3_v.get_stats().num_vole_extensions_performed];
+            let ext = |r: &CDMOPRFReceiver| [r.f2_p.get_stats(), r.f3_p.get_stats(), r.f2_v.get_stats(), r.f3_v.get_stats(), r.fk.get_stats(), r.fk_delta.get_stats()]
+                .map(|s| s.num_vole_extensions_performed);
             let before = ext(&r);
             r.oprf_client(inputs, &mut channel, &mut rng);
             let after = ext(&r);
-            [0, 1, 2, 3].map(|i| after[i] - before[i])
+            [0, 1, 2, 3, 4, 5].map(|i| after[i] - before[i])
         });
         let mut rng = AesRng::from_seed(seed);
         let mut channel = Channel::new(BufReader::new(server.try_clone().unwrap()), BufWriter::new(server));
         let mut s = init_cdm_oprf_sender(&mut channel, &mut rng, batch_size, b, bs, OPRFSetting::RevealOutput);
-        let ext = |s: &CDMOPRFSender| [s.f2_p.get_stats().num_vole_extensions_performed, s.f3_p.get_stats().num_vole_extensions_performed,
-            s.f2_v.get_stats().num_vole_extensions_performed, s.f3_v.get_stats().num_vole_extensions_performed];
+        let ext = |s: &CDMOPRFSender| [s.f2_p.get_stats(), s.f3_p.get_stats(), s.f2_v.get_stats(), s.f3_v.get_stats(), s.fk.get_stats(), s.fk_delta.get_stats()]
+            .map(|s| s.num_vole_extensions_performed);
         let before = ext(&s);
         s.oprf_server(batch_size, &mut channel, &mut rng);
         let after = ext(&s);
         let client = handle.join().unwrap();
-        [client[0], client[1], client[2], client[3], after[0] - before[0], after[1] - before[1], after[2] - before[2], after[3] - before[3]]
+        let server = [0, 1, 2, 3, 4, 5].map(|i| after[i] - before[i]);
+        [client[0], client[1], client[2], client[3], client[4], client[5], server[0], server[1], server[2], server[3], server[4], server[5]]
     }
 
     #[test]
     fn test_no_vole_extensions_online() {
         // preprocessing must reserve every VOLE that the online phase draws
         for batch_size in [2, 64] {
-            assert_eq!(online_vole_extensions(batch_size), [0; 8], "batch {}", batch_size);
+            assert_eq!(online_vole_extensions(batch_size), [0; 12], "batch {}", batch_size);
         }
     }
 

@@ -351,19 +351,25 @@ mod test{
                 let mut rng = AesRng::from_seed(seed);
                 let mut channel = Channel::new(BufReader::new(client.try_clone().unwrap()), BufWriter::new(client));
                 let (habits, encoding_dabits, mut fcom_p_3, mut fcom_p_2, mut fcom_k, mut fcom_k_delta) = c_preprocess_client(&mut channel, &mut rng, batch_size);
-                let before = [fcom_p_2.get_stats().num_vole_extensions_performed, fcom_p_3.get_stats().num_vole_extensions_performed];
+                let ext = |a: &FComProver<F256b>, b: &FComProver<F82t>, c: &FComProver<F256b>, d: &FComProver<F256b>|
+                    [a.get_stats(), b.get_stats(), c.get_stats(), d.get_stats()].map(|s| s.num_vole_extensions_performed);
+                let before = ext(&fcom_p_2, &fcom_p_3, &fcom_k, &fcom_k_delta);
                 c_oprf_client(inputs, &mut channel, &mut rng, bc, habits, encoding_dabits, &mut fcom_p_3, &mut fcom_p_2, &mut fcom_k, &mut fcom_k_delta);
-                [fcom_p_2.get_stats().num_vole_extensions_performed - before[0], fcom_p_3.get_stats().num_vole_extensions_performed - before[1]]
+                let after = ext(&fcom_p_2, &fcom_p_3, &fcom_k, &fcom_k_delta);
+                [0, 1, 2, 3].map(|i| after[i] - before[i])
             });
             let mut rng = AesRng::from_seed(seed);
             let mut channel = Channel::new(BufReader::new(server.try_clone().unwrap()), BufWriter::new(server));
             let key = F256b::random(&mut rng);
             let (habits, encoding_dabits, mut fcom_v_2, mut fcom_v_3, mut fcom_k, mut fcom_k_delta) = c_preprocess_server(&mut channel, &mut rng, batch_size, key);
-            let before = [fcom_v_2.get_stats().num_vole_extensions_performed, fcom_v_3.get_stats().num_vole_extensions_performed];
+            let ext = |a: &FComVerifier<F256b>, b: &FComVerifier<F82t>, c: &FComVerifier<F256b>, d: &FComVerifier<F256b>|
+                [a.get_stats(), b.get_stats(), c.get_stats(), d.get_stats()].map(|s| s.num_vole_extensions_performed);
+            let before = ext(&fcom_v_2, &fcom_v_3, &fcom_k, &fcom_k_delta);
             c_oprf_server(key, batch_size, &mut channel, &mut rng, bs, habits, encoding_dabits, &mut fcom_v_2, &mut fcom_v_3, &mut fcom_k, &mut fcom_k_delta);
-            let server = [fcom_v_2.get_stats().num_vole_extensions_performed - before[0], fcom_v_3.get_stats().num_vole_extensions_performed - before[1]];
+            let after = ext(&fcom_v_2, &fcom_v_3, &fcom_k, &fcom_k_delta);
+            let server = [0, 1, 2, 3].map(|i| after[i] - before[i]);
             let client = handle.join().unwrap();
-            assert_eq!((client, server), ([0, 0], [0, 0]), "batch {}", batch_size);
+            assert_eq!((client, server), ([0; 4], [0; 4]), "batch {}", batch_size);
         }
     }
 

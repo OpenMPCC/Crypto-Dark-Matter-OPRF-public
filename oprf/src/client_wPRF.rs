@@ -28,10 +28,10 @@ Fp::PrimeField: TryFrom<u8>
     let mut fcom_p_2 = FComProver::<Fb>::init_from_previous_setup_sender(channel, rng, lpn_setup_params_f2, lpn_extend_params_f2, a).unwrap();
 
     let (fcom_k_params, fcom_k_params_extend) = choose_lpn_parameters::<Fb>(batch_size*n);
-    let fcom_k = FComProver::<Fb>::init_from_previous_setup_sender(channel, rng, fcom_k_params, fcom_k_params_extend, a).unwrap();
+    let mut fcom_k = FComProver::<Fb>::init_from_previous_setup_sender(channel, rng, fcom_k_params, fcom_k_params_extend, a).unwrap();
 
     let (lpn_share_setup_params, lpn_share_extend_params) = choose_lpn_parameters::<Fb>(batch_size*n);
-    let fcom_k_delta = FComProver::<Fb>::init_from_previous_setup_sender(channel, rng, lpn_share_setup_params, lpn_share_extend_params, a).unwrap();
+    let mut fcom_k_delta = FComProver::<Fb>::init_from_previous_setup_sender(channel, rng, lpn_share_setup_params, lpn_share_extend_params, a).unwrap();
 
     let mut ha_bits: (Vec<OPRFSharing<Fb>>, Vec<Fp::PrimeField>) = (Vec::new(), Vec::new());
     let mut encoding_dabits: (Vec<MacProver<Fb>>, Vec<MacProver<Fp>>) = (Vec::new(), Vec::new());
@@ -63,6 +63,10 @@ Fp::PrimeField: TryFrom<u8>
     }
 
 
+    // The key VOLEs each draw n VOLEs per input online; reserve them now so that
+    // no VOLE extension runs in the online phase.
+    fcom_k.voles_reserve(channel, rng, n*batch_size).unwrap();
+    fcom_k_delta.voles_reserve(channel, rng, n*batch_size).unwrap();
     return (ha_bits, encoding_dabits, fcom_p_3, fcom_p_2, fcom_k, fcom_k_delta);
 }
 
@@ -87,10 +91,10 @@ Fp::PrimeField: TryFrom<u8>
     let mut fcom_v_2 = FComVerifier::<Fb>::init_from_previous_setup_receiver(channel, rng, lpn_setup_params_f2, lpn_extend_params_f2, a).unwrap();
 
     let (fcom_k_params, fcom_k_params_extend) = choose_lpn_parameters::<Fb>(batch_size*n);
-    let fcom_k: FComVerifier<Fb> = FComVerifier::<Fb>::init_with_picked_delta_and_ot_receiver(channel, rng, fcom_k_params, fcom_k_params_extend, key, a).unwrap();
+    let mut fcom_k: FComVerifier<Fb> = FComVerifier::<Fb>::init_with_picked_delta_and_ot_receiver(channel, rng, fcom_k_params, fcom_k_params_extend, key, a).unwrap();
 
     let (lpn_share_setup_params, lpn_share_extend_params) = choose_lpn_parameters::<Fb>(batch_size*n);
-    let fcom_k_delta = FComVerifier::<Fb>::init_with_picked_delta_and_ot_receiver(channel, rng, lpn_share_setup_params, lpn_share_extend_params, key* fcom_v_2.get_delta(), a).unwrap();
+    let mut fcom_k_delta = FComVerifier::<Fb>::init_with_picked_delta_and_ot_receiver(channel, rng, lpn_share_setup_params, lpn_share_extend_params, key* fcom_v_2.get_delta(), a).unwrap();
     
     let mut ha_bits: (Vec<OPRFSharing<Fb>>, Vec<Fp::PrimeField>) = (Vec::new(), Vec::new());
     let mut encoding_dabits: (Vec<MacVerifier<Fb>>, Vec<MacVerifier<Fp>>) = (Vec::new(), Vec::new());
@@ -121,6 +125,9 @@ Fp::PrimeField: TryFrom<u8>
     }
 
 
+    // Reserve the online key VOLEs; see c_preprocess_client.
+    fcom_k.voles_reserve(channel, rng, n*batch_size).unwrap();
+    fcom_k_delta.voles_reserve(channel, rng, n*batch_size).unwrap();
     return (ha_bits, encoding_dabits, fcom_v_2, fcom_v_3, fcom_k, fcom_k_delta);
 }
 
